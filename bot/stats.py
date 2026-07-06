@@ -1,0 +1,75 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+KIND_LABELS = {
+    "text": "📝 текст",
+    "voice": "🎤 гс",
+    "video_note": "⭕ кружки",
+    "photo": "📷 фото",
+    "video": "🎬 видео",
+    "audio": "🎵 аудио",
+    "document": "📎 файлы",
+    "sticker": "🙂 стикеры",
+    "animation": "GIF",
+    "other": "📦 прочее",
+}
+
+
+@dataclass(slots=True)
+class ChatStats:
+    title: str
+    total: int = 0
+    kinds: dict[str, int] = field(default_factory=dict)
+
+    def add(self, kind: str, count: int = 1) -> None:
+        self.total += count
+        self.kinds[kind] = self.kinds.get(kind, 0) + count
+
+    def top_kinds(self, limit: int = 4) -> list[tuple[str, int]]:
+        return sorted(self.kinds.items(), key=lambda item: item[1], reverse=True)[:limit]
+
+
+def format_kind_line(kinds: list[tuple[str, int]]) -> str:
+    if not kinds:
+        return ""
+    parts = [f"{KIND_LABELS.get(kind, kind)}: {count}" for kind, count in kinds]
+    return " · ".join(parts)
+
+
+def format_chats_report(
+    rows: list[tuple[str, ChatStats]],
+    *,
+    cache_size: int,
+    media_files: int,
+    ttl_hours: float,
+    max_entries: int,
+    db_active: int | None = None,
+    db_total: int | None = None,
+) -> str:
+    lines = [
+        "<b>📊 Статистика чатов</b>",
+        f"Кэш RAM: <b>{cache_size}</b> / {max_entries} · медиа: <b>{media_files}</b>",
+        f"Автоочистка кэша: <b>{ttl_hours:g}</b> ч",
+    ]
+    if db_active is not None:
+        lines.append(
+            f"БД: <b>{db_active}</b> активных · <b>{db_total or 0}</b> всего (с удалёнными)"
+        )
+    lines.append("")
+
+    if not rows:
+        lines.append("Пока нет данных — дождитесь сообщений от собеседников.")
+        return "\n".join(lines)
+
+    for index, (chat_id, stats) in enumerate(rows[:10], start=1):
+        lines.append(f"<b>{index}. {stats.title}</b> — {stats.total} сообщ.")
+        kind_line = format_kind_line(stats.top_kinds())
+        if kind_line:
+            lines.append(f"   {kind_line}")
+        lines.append(f"   <code>id:{chat_id}</code>")
+
+    if len(rows) > 10:
+        lines.append(f"\n<i>…и ещё {len(rows) - 10} чатов</i>")
+
+    return "\n".join(lines)
