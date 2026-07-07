@@ -32,6 +32,23 @@ class Database:
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._init_schema()
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Аккуратно докатывает схему для БД, оставшихся от старой версии бота
+        (там были только таблицы messages/chat_stats, без owner_id — новые
+        таблицы owners/connections/notes/reminders создаёт CREATE TABLE IF NOT
+        EXISTS в _init_schema). Ничего не удаляет, только добавляет недостающее.
+        """
+        columns = {
+            row["name"] for row in self._conn.execute("PRAGMA table_info(messages)").fetchall()
+        }
+        if "owner_id" not in columns:
+            logger.info("Миграция БД: добавляю колонку messages.owner_id")
+            self._conn.execute("ALTER TABLE messages ADD COLUMN owner_id INTEGER")
+            self._conn.commit()
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_owner ON messages(owner_id)")
+        self._conn.commit()
 
     def close(self) -> None:
         self._conn.close()
@@ -109,7 +126,6 @@ class Database:
 
             CREATE INDEX IF NOT EXISTS idx_messages_cached_at ON messages(cached_at);
             CREATE INDEX IF NOT EXISTS idx_messages_deleted_at ON messages(deleted_at);
-            CREATE INDEX IF NOT EXISTS idx_messages_owner ON messages(owner_id);
             """
         )
         self._conn.commit()
