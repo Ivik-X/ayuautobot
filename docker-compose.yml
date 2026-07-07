@@ -1,0 +1,8 @@
+services:
+  bot:
+    build: .
+    image: ayuautobot:latest
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
