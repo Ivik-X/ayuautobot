@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -85,10 +86,17 @@ def media_flags(message: Message) -> list[str]:
     return flags
 
 
-async def download_media(bot: Bot, media: MediaRef, message_id: int) -> MediaRef:
-    MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+def _owner_dir(base: Path, connection_id: str) -> Path:
+    # разложено по connection_id, чтобы не смешивать медиа разных владельцев
+    safe = "".join(c for c in connection_id if c.isalnum())[:40] or "common"
+    return base / safe
+
+
+async def download_media(bot: Bot, media: MediaRef, message_id: int, connection_id: str) -> MediaRef:
+    directory = _owner_dir(MEDIA_DIR, connection_id)
+    directory.mkdir(parents=True, exist_ok=True)
     ext = _guess_extension(media)
-    destination = MEDIA_DIR / f"{message_id}_{media.kind}{ext}"
+    destination = directory / f"{message_id}_{media.kind}{ext}"
 
     try:
         tg_file = await bot.get_file(media.file_id)
@@ -168,3 +176,57 @@ def unlink_media(media: MediaRef | None) -> None:
             media.local_path.unlink()
     except OSError:
         logger.debug("Не удалось удалить файл %s", media.local_path, exc_info=True)
+
+
+def directory_size_bytes(path: Path) -> int:
+    total = 0
+    if not path.exists():
+        return 0
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            fp = Path(root) / name
+            try:
+                total += fp.stat().st_size
+            except OSError:
+                pass
+    return total
+
+
+def enforce_media_quota(base_dir: Path, max_total_mb: int) -> int:
+    """Удаляет самые старые файлы, пока суммарный размер base_dir не впишется в лимит.
+
+    Возвращает количество удалённых файлов. Защищает 10 GB NVMe от переполнения.
+    """
+    if max_total_mb <= 0 or not base_dir.exists():
+        return 0
+
+    max_bytes = max_total_mb * 1024 * 1024
+    entries: list[tuple[float, Path, int]] = []
+    total = 0
+    for root, _dirs, files in os.walk(base_dir):
+        for name in files:
+            if name == ".gitkeep":
+                continue
+            fp = Path(root) / name
+            try:
+                st = fp.stat()
+            except OSError:
+                continue
+            entries.append((st.st_mtime, fp, st.st_size))
+            total += st.st_size
+
+    if total <= max_bytes:
+        return 0
+
+    entries.sort(key=lambda item: item[0])  # старые первыми
+    removed = 0
+    for _mtime, fp, size in entries:
+        if total <= max_bytes:
+            break
+        try:
+            fp.unlink()
+            total -= size
+            removed += 1
+        except OSError:
+            pass
+    return removed

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,9 +9,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 DEFAULT_START = (
-    "Бот для Telegram Business («Автоматизация чатов»).\n\n"
+    "👋 Бот для Telegram Business («Автоматизация чатов»).\n\n"
     "Подключите меня: Настройки → Telegram для бизнеса → Чат-боты.\n"
     "Выдайте права: отвечать, читать и удалять сообщения.\n\n"
+    "Напишите /settings в этом чате, чтобы настроить бота под себя.\n\n"
     "{help}"
 )
 
@@ -20,13 +20,14 @@ DEFAULT_HELP = """<b>Команды</b> (в чате с собеседником
 
 <b>Основные</b>
 • <code>.spam 5 текст</code> — отправить 5 сообщений
-• <code>.mute 60</code> — удалять входящие 60 сек
+• <code>.mute 60</code> — удалять входящие 60 сек (без числа — значение по умолчанию)
 • <code>.unmute</code> — выключить mute
 
 <b>Развлечения</b>
 • <code>.typing 5</code> — статус «печатает…»
 • <code>.dice</code> — кинуть кубик
 • <code>.flip</code> — монетка
+• <code>.8ball вопрос</code> — магический шар
 • <code>.bomb 5</code> / <code>.love 5</code> — спам эмодзи
 • <code>.mock текст</code> — sPoNgEbOb
 • <code>.clown текст</code> — к🤡л🤡о🤡у🤡н
@@ -35,14 +36,32 @@ DEFAULT_HELP = """<b>Команды</b> (в чате с собеседником
 • <code>.zalgo текст</code> — залго-текст
 • <code>.rand</code> / <code>.rand 1 50</code> — случайное число
 
-<b>Кэш и данные</b>
-• <code>.stats</code> — кэш и память
+<b>Утилиты</b>
+• <code>.calc 2*(3+4)</code> — калькулятор
+• <code>.tr en текст</code> — перевод на указанный язык (ru/en/…)
+• <code>.weather Москва</code> — погода
+• <code>.currency 100 USD EUR</code> — конвертация валют
+• <code>.qr текст или ссылка</code> — QR-код
+• <code>.short ссылка</code> — сократить ссылку
+
+<b>Заметки и напоминания</b>
+• <code>.note add имя текст</code> — сохранить заготовку
+• <code>.note list</code> / <code>.note del имя</code>
+• <code>.say имя</code> — отправить заготовку в чат
+• <code>.remind 10 текст</code> — напомнить себе через 10 минут
+• <code>.afk on текст</code> / <code>.afk off</code> — автоответ, пока вас нет
+
+<b>Кэш, данные и инфо</b>
+• <code>.stats</code> — кэш, БД и память
 • <code>.chats</code> — топ чатов по активности
-• <code>.purge</code> — очистить оперативный кэш
-• <code>.purge 30</code> — удалить из кэша старше 30 мин
+• <code>.info</code> — информация о чате/сообщении
+• <code>.id</code> — ID чата и пользователя
+• <code>.purge</code> / <code>.purge 30</code> — очистить кэш (весь / старше 30 мин)
+• <code>.settings</code> — ссылка на настройки бота
 • <code>.ping</code> — проверка связи
 
-Удаления, правки и медиа собеседника приходят в этот чат."""
+Удаления, правки и медиа собеседника приходят в этот чат.
+Гибкие настройки — командой /settings в этом чате."""
 
 DEFAULT_PONG = "🏓 pong — бот на связи"
 

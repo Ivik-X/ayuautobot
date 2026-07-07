@@ -18,3 +18,5 @@ data/db_media/*
 Dockerfile
 docker-compose.yml
 .dockerignore
+data/tmp/*
+!data/tmp/.gitkeep

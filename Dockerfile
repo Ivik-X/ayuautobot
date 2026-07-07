@@ -15,8 +15,9 @@ RUN pip install -r requirements.txt
 COPY bot/ bot/
 COPY data/media/.gitkeep data/media/.gitkeep
 COPY data/db_media/.gitkeep data/db_media/.gitkeep
+COPY data/tmp/.gitkeep data/tmp/.gitkeep
 
-RUN mkdir -p data/media data/db_media && chown -R appuser:appuser /app
+RUN mkdir -p data/media data/db_media data/tmp && chown -R appuser:appuser /app
 
 USER appuser
 

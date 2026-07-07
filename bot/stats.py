@@ -38,7 +38,7 @@ def format_kind_line(kinds: list[tuple[str, int]]) -> str:
 
 
 def format_chats_report(
-    rows: list[tuple[str, ChatStats]],
+    rows: list[tuple[int, ChatStats]],
     *,
     cache_size: int,
     media_files: int,
@@ -53,9 +53,7 @@ def format_chats_report(
         f"Автоочистка кэша: <b>{ttl_hours:g}</b> ч",
     ]
     if db_active is not None:
-        lines.append(
-            f"БД: <b>{db_active}</b> активных · <b>{db_total or 0}</b> всего (с удалёнными)"
-        )
+        lines.append(f"БД: <b>{db_active}</b> активных · <b>{db_total or 0}</b> всего (с удалёнными)")
     lines.append("")
 
     if not rows:
@@ -73,3 +71,35 @@ def format_chats_report(
         lines.append(f"\n<i>…и ещё {len(rows) - 10} чатов</i>")
 
     return "\n".join(lines)
+
+
+def format_admin_overview(
+    *,
+    owners_count: int,
+    connections_count: int,
+    db_size_mb: float,
+    db_messages: int,
+    db_messages_total: int,
+    media_mb: float,
+    backup_enabled: bool,
+    backup_interval_hours: float,
+    last_backup_ts: float | None,
+) -> str:
+    import time as _time
+
+    last_backup = "ещё не выполнялся"
+    if last_backup_ts:
+        ago_min = int((_time.time() - last_backup_ts) // 60)
+        last_backup = f"{ago_min} мин. назад"
+
+    return (
+        "<b>🛠 Панель администратора</b>\n\n"
+        f"👥 Владельцев бизнес-подключений: <b>{owners_count}</b>\n"
+        f"🔗 Активных подключений: <b>{connections_count}</b>\n\n"
+        f"💾 Размер БД: <b>{db_size_mb:.1f} МБ</b>\n"
+        f"🗂 Сообщений: <b>{db_messages}</b> активных / <b>{db_messages_total}</b> всего\n"
+        f"🖼 Медиа на диске: <b>{media_mb:.1f} МБ</b>\n\n"
+        f"📦 Автобэкап: <b>{'вкл' if backup_enabled else 'выкл'}</b> "
+        f"(каждые {backup_interval_hours:g} ч)\n"
+        f"🕓 Последний бэкап: {last_backup}"
+    )

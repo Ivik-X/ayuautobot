@@ -1,30 +1,46 @@
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 
 from aiogram.types import BusinessConnection, Message
 
+from bot.cache import LRUCache
+from bot.config import Config
 from bot.database import Database
-from bot.media import media_flags, unlink_media
+from bot.media import MediaRef, media_flags, unlink_media
 from bot.models import CachedMessage, MuteSession
+from bot.settings import OwnerSettings
 from bot.stats import ChatStats
+
+AFK_REPLY_COOLDOWN_SECONDS = 300
 
 
 class Storage:
-    def __init__(self, db: Database | None = None) -> None:
+    def __init__(self, db: Database, config: Config) -> None:
         self._db = db
+        self._config = config
         self._connections: dict[str, BusinessConnection] = {}
-        self._cache: dict[tuple[str, int, int], CachedMessage] = {}
-        self._stats: dict[tuple[str, int], ChatStats] = {}
+        self._owner_of_connection: dict[str, int] = {}
+        self._settings_cache: dict[int, OwnerSettings] = {}
+        self._cache: LRUCache[tuple[str, int, int], CachedMessage] = LRUCache(config.cache.max_entries)
         self._mute: dict[tuple[str, int], MuteSession] = {}
         self._bot_deleted: set[tuple[str, int, int]] = set()
+        self._afk_last_reply: dict[tuple[str, int], float] = {}
 
     @property
-    def db(self) -> Database | None:
+    def db(self) -> Database:
         return self._db
 
+    # ------------------------------------------------------------ connections
     def set_connection(self, connection: BusinessConnection) -> None:
         self._connections[connection.id] = connection
+        owner_id = connection.user.id
+        self._owner_of_connection[connection.id] = owner_id
+        self._db.ensure_owner(owner_id, is_admin=owner_id in self._config.admin_ids)
+        self._db.upsert_connection(
+            connection.id, owner_id, connection.user_chat_id, connection.is_enabled
+        )
 
     def get_connection(self, connection_id: str) -> BusinessConnection | None:
         return self._connections.get(connection_id)
@@ -35,7 +51,14 @@ class Storage:
 
     def owner_user_id(self, connection_id: str) -> int | None:
         connection = self._connections.get(connection_id)
-        return connection.user.id if connection else None
+        if connection:
+            return connection.user.id
+        if connection_id in self._owner_of_connection:
+            return self._owner_of_connection[connection_id]
+        owner = self._db.owner_for_connection(connection_id)
+        if owner is not None:
+            self._owner_of_connection[connection_id] = owner
+        return owner
 
     def is_bot_message(self, message: Message) -> bool:
         return message.sender_business_bot is not None
@@ -60,6 +83,39 @@ class Storage:
             return True
         return message.from_user.id != owner_id
 
+    # -------------------------------------------------------------- settings
+    def get_settings(self, owner_id: int) -> OwnerSettings:
+        cached = self._settings_cache.get(owner_id)
+        if cached is not None:
+            return cached
+        raw = self._db.get_owner_settings_raw(owner_id)
+        settings = OwnerSettings.from_json(raw, self._config.default_settings)
+        self._settings_cache[owner_id] = settings
+        return settings
+
+    def get_settings_for_connection(self, connection_id: str) -> OwnerSettings:
+        owner_id = self.owner_user_id(connection_id)
+        if owner_id is None:
+            return self._config.default_settings
+        return self.get_settings(owner_id)
+
+    def save_settings(self, owner_id: int, settings: OwnerSettings) -> None:
+        self._db.ensure_owner(owner_id, is_admin=owner_id in self._config.admin_ids)
+        self._db.save_owner_settings(owner_id, settings.to_json())
+        self._settings_cache[owner_id] = settings
+
+    def update_setting(self, owner_id: int, key: str, value) -> OwnerSettings:
+        current = self.get_settings(owner_id)
+        updated = replace(current, **{key: value})
+        self.save_settings(owner_id, updated)
+        return updated
+
+    def toggle_setting(self, owner_id: int, key: str) -> OwnerSettings:
+        current = self.get_settings(owner_id)
+        value = getattr(current, key)
+        return self.update_setting(owner_id, key, not value)
+
+    # ---------------------------------------------------------------- caching
     def cache_message(
         self,
         connection_id: str,
@@ -86,137 +142,102 @@ class Storage:
         old = self._cache.get(key)
         if old is not None:
             unlink_media(old.media)
-        elif not self._db:
-            self._touch_stats(connection_id, message.chat.id, title, kind)
+        self._cache.set(key, cached)
 
-        self._cache[key] = cached
-
-        if self._db is not None:
-            self._db.upsert_message(cached, title)
+        owner_id = self.owner_user_id(connection_id)
+        settings = self.get_settings(owner_id) if owner_id is not None else self._config.default_settings
+        if settings.store_history:
+            self._db.upsert_message(cached, title, owner_id)
 
         return cached
 
-    def find_cached(
-        self,
-        connection_id: str,
-        chat_id: int,
-        message_id: int,
-    ) -> CachedMessage | None:
+    def find_cached(self, connection_id: str, chat_id: int, message_id: int) -> CachedMessage | None:
         for key in _lookup_keys(connection_id, chat_id, message_id):
             cached = self._cache.get(key)
             if cached is not None:
                 return cached
 
-        if self._db is not None:
-            cached = self._db.get_message(connection_id, chat_id, message_id)
-            if cached is not None:
-                self._cache[(connection_id, cached.chat_id, message_id)] = cached
-                return cached
-
+        cached = self._db.get_message(connection_id, chat_id, message_id)
+        if cached is not None:
+            self._cache.set((connection_id, cached.chat_id, message_id), cached)
+            return cached
         return None
 
-    def remove_cached(
-        self,
-        connection_id: str,
-        chat_id: int,
-        message_id: int,
-    ) -> CachedMessage | None:
+    def remove_cached(self, connection_id: str, chat_id: int, message_id: int) -> CachedMessage | None:
         cached = self.find_cached(connection_id, chat_id, message_id)
 
         for key in _lookup_keys(connection_id, chat_id, message_id):
-            item = self._cache.pop(key, None)
+            item = self._cache.pop(key)
             if item is not None:
                 unlink_media(item.media)
 
-        if self._db is not None:
-            db_cached = self._db.mark_deleted(connection_id, chat_id, message_id)
-            return cached or db_cached
+        db_cached = self._db.mark_deleted(connection_id, chat_id, message_id)
+        return cached or db_cached
 
-        return cached
-
-    def purge_expired(self, ttl_seconds: float) -> int:
-        if ttl_seconds <= 0:
-            return 0
-        cutoff = time.time() - ttl_seconds
-        stale = [key for key, item in self._cache.items() if item.cached_at < cutoff]
+    def purge_expired_all(self) -> int:
+        """Чистит RAM-кэш с учётом персонального TTL каждого владельца."""
+        now = time.time()
+        stale: list[tuple[str, int, int]] = []
+        for key, item in self._cache.items():
+            owner_id = self.owner_user_id(key[0])
+            settings = self.get_settings(owner_id) if owner_id is not None else self._config.default_settings
+            ttl_seconds = max(settings.cache_ttl_hours, 0) * 3600
+            if ttl_seconds and now - item.cached_at > ttl_seconds:
+                stale.append(key)
         for key in stale:
-            self._drop_key(key)
+            item = self._cache.pop(key)
+            if item is not None:
+                unlink_media(item.media)
         return len(stale)
 
     def purge_all(self) -> int:
         count = len(self._cache)
-        for key in list(self._cache):
-            self._drop_key(key)
-        self._stats.clear()
+        for key, item in list(self._cache.items()):
+            unlink_media(item.media)
+            self._cache.pop(key)
         return count
 
     def purge_older_than(self, minutes: int) -> int:
-        return self.purge_expired(minutes * 60)
-
-    def enforce_max_entries(self, max_entries: int) -> int:
-        if max_entries <= 0 or len(self._cache) <= max_entries:
-            return 0
-
-        overflow = len(self._cache) - max_entries
-        oldest = sorted(self._cache.items(), key=lambda item: item[1].cached_at)
-        removed = 0
-        for key, _ in oldest[:overflow]:
-            self._drop_key(key)
-            removed += 1
-        return removed
+        cutoff = time.time() - minutes * 60
+        stale = [key for key, item in self._cache.items() if item.cached_at < cutoff]
+        for key in stale:
+            item = self._cache.pop(key)
+            if item is not None:
+                unlink_media(item.media)
+        return len(stale)
 
     def cached_count(self, connection_id: str | None = None) -> int:
         if connection_id is None:
             return len(self._cache)
-        return sum(1 for key in self._cache if key[0] == connection_id)
+        return sum(1 for key, _ in self._cache.items() if key[0] == connection_id)
 
     def media_files_count(self) -> int:
-        return sum(1 for item in self._cache.values() if item.media and item.media.local_path)
+        return sum(1 for _key, item in self._cache.items() if item.media and item.media.local_path)
 
     def chat_stats(self, connection_id: str) -> list[tuple[int, ChatStats]]:
-        if self._db is not None:
-            return self._db.chat_stats(connection_id)
+        return self._db.chat_stats(connection_id)
 
-        rows = [
-            (chat_id, stats)
-            for (cid, chat_id), stats in self._stats.items()
-            if cid == connection_id
-        ]
-        rows.sort(key=lambda row: row[1].total, reverse=True)
-        return rows
-
-    def db_count(self, connection_id: str | None = None) -> int | None:
-        if self._db is None:
-            return None
+    def db_count(self, connection_id: str | None = None) -> int:
         return self._db.count_messages(connection_id)
 
-    def db_total_count(self) -> int | None:
-        if self._db is None:
-            return None
+    def db_total_count(self) -> int:
         return self._db.count_all_messages()
 
+    # -------------------------------------------------------------- deletion
     def mark_bot_deleted(self, connection_id: str, chat_id: int, message_id: int) -> None:
         self._bot_deleted.add((connection_id, chat_id, message_id))
 
     def was_bot_deleted(self, connection_id: str, chat_id: int, message_id: int) -> bool:
-        if (connection_id, chat_id, message_id) in self._bot_deleted:
-            self._bot_deleted.discard((connection_id, chat_id, message_id))
+        key = (connection_id, chat_id, message_id)
+        if key in self._bot_deleted:
+            self._bot_deleted.discard(key)
             return True
         return False
 
-    def start_mute(
-        self,
-        connection_id: str,
-        chat_id: int,
-        *,
-        seconds: int | None = None,
-        count: int | None = None,
-    ) -> None:
+    # ------------------------------------------------------------------ mute
+    def start_mute(self, connection_id: str, chat_id: int, *, seconds: int | None = None, count: int | None = None) -> None:
         expires_at = time.time() + seconds if seconds is not None else None
-        self._mute[(connection_id, chat_id)] = MuteSession(
-            expires_at=expires_at,
-            remaining=count,
-        )
+        self._mute[(connection_id, chat_id)] = MuteSession(expires_at=expires_at, remaining=count)
 
     def stop_mute(self, connection_id: str, chat_id: int) -> None:
         self._mute.pop((connection_id, chat_id), None)
@@ -241,20 +262,39 @@ class Storage:
         if session.remaining <= 0:
             self.stop_mute(connection_id, chat_id)
 
-    def _touch_stats(self, connection_id: str, chat_id: int, title: str, kind: str) -> None:
+    # ------------------------------------------------------------------- afk
+    def should_send_afk_reply(self, connection_id: str, chat_id: int) -> bool:
         key = (connection_id, chat_id)
-        stats = self._stats.get(key)
-        if stats is None:
-            stats = ChatStats(title=title)
-            self._stats[key] = stats
-        elif title and stats.title in ("", str(chat_id)):
-            stats.title = title
-        stats.add(kind)
+        now = time.time()
+        last = self._afk_last_reply.get(key, 0)
+        if now - last < AFK_REPLY_COOLDOWN_SECONDS:
+            return False
+        self._afk_last_reply[key] = now
+        return True
 
-    def _drop_key(self, key: tuple[str, int, int]) -> None:
-        cached = self._cache.pop(key, None)
-        if cached is not None:
-            unlink_media(cached.media)
+    # ----------------------------------------------------------------- notes
+    def note_add(self, owner_id: int, name: str, text: str) -> None:
+        self._db.note_set(owner_id, name, text)
+
+    def note_get(self, owner_id: int, name: str) -> str | None:
+        return self._db.note_get(owner_id, name)
+
+    def note_delete(self, owner_id: int, name: str) -> bool:
+        return self._db.note_delete(owner_id, name)
+
+    def note_list(self, owner_id: int) -> list[str]:
+        return self._db.note_list(owner_id)
+
+    # ------------------------------------------------------------- reminders
+    def reminder_add(self, owner_id: int, connection_id: str, chat_id: int, minutes: float, text: str) -> int:
+        fire_at = time.time() + minutes * 60
+        return self._db.reminder_add(owner_id, connection_id, chat_id, fire_at, text)
+
+    def reminder_delete(self, reminder_id: int) -> None:
+        self._db.reminder_delete(reminder_id)
+
+    def reminders_pending(self):
+        return self._db.reminders_pending()
 
 
 def _lookup_keys(connection_id: str, chat_id: int, message_id: int) -> list[tuple[str, int, int]]:

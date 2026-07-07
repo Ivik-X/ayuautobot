@@ -40,3 +40,14 @@ def zalgo_text(text: str, intensity: int = 3) -> str:
         if char.strip():
             result.extend(random.choice(marks) for _ in range(random.randint(1, intensity)))
     return "".join(result)
+
+
+_EIGHTBALL_ANSWERS = [
+    "Да 👍", "Нет 👎", "Скорее да", "Скорее нет", "Определённо!", "Сомнительно...",
+    "Спроси позже", "100% да", "Даже не думай", "Возможно 🤔", "Звёзды говорят — да",
+    "Мой ответ — нет",
+]
+
+
+def eightball() -> str:
+    return random.choice(_EIGHTBALL_ANSWERS)
