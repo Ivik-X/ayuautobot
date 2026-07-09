@@ -1,177 +1,477 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, Message
 
 from bot.backup import BackupManager
-from bot.config import Config
-from bot.keyboards import CB_CLOSE, CB_EDIT, CB_TOGGLE, settings_keyboard
-from bot.media import MEDIA_DIR, directory_size_bytes
-from bot.settings import get_field, parse_value
+from bot.media import MEDIA_DIR, MediaRef, directory_size_bytes, extract_media, send_media_copy
+from bot.keyboards import (
+    admin_back_keyboard,
+    admin_main_keyboard,
+    admin_section_keyboard,
+    help_back_keyboard,
+    help_topics_keyboard,
+    main_settings_keyboard,
+    preset_creation_keyboard,
+    presets_keyboard,
+    section_keyboard,
+)
+from bot.settings import get_admin_field, get_owner_field, next_cycle_value, parse_value
 from bot.stats import format_admin_overview
 from bot.storage import Storage
-from bot.texts import Texts
+from bot.texts import DEFAULT_ADMIN_HINT, HELP_INTRO, HELP_TOPIC_BODIES, Texts
 
 logger = logging.getLogger(__name__)
 
 router = Router(name="service")
 
-# owner_id -> ключ настройки, которую сейчас редактируют текстом
-_pending_edit: dict[int, str] = {}
+SECTION_TITLES = {
+    "notif": "🔔 Уведомления",
+    "extra": "🧩 Доп. функции",
+    "cmds": "🛠 Команды",
+    "misc": "⚙️ Прочее",
+}
+ADMIN_SECTION_TITLES = {
+    "backup": "📦 Бэкапы",
+    "cache": "📥 Кэш и медиа",
+    "data": "💾 Данные",
+}
+
+# user_id -> состояние текущего диалогового шага (ввод текста/сбор пресета)
+_pending: dict[int, dict] = {}
 
 
-def _is_admin(user_id: int, config: Config) -> bool:
-    return user_id in config.admin_ids
-
-
+# ------------------------------------------------------------------------ /start
 @router.message(CommandStart())
-async def cmd_start(message: Message, texts: Texts, storage: Storage) -> None:
-    storage.db.ensure_owner(message.from_user.id)
-    await message.answer(texts.start)
+async def cmd_start(message: Message, storage: Storage, texts: Texts) -> None:
+    is_admin = storage.is_admin(message.from_user.id)
+    storage.db.ensure_owner(message.from_user.id, is_admin=is_admin)
+    hint = DEFAULT_ADMIN_HINT if is_admin else ""
+    await message.answer(texts.start.replace("{admin_hint}", hint))
 
 
+# ------------------------------------------------------------------------- /help
 @router.message(Command("help"))
-async def cmd_help(message: Message, texts: Texts) -> None:
-    await message.answer(texts.help)
+async def cmd_help(message: Message) -> None:
+    await message.answer(HELP_INTRO, reply_markup=help_topics_keyboard())
 
 
-@router.message(Command("settings"))
-async def cmd_settings(message: Message, storage: Storage) -> None:
-    owner_id = message.from_user.id
-    storage.db.ensure_owner(owner_id)
-    settings = storage.get_settings(owner_id)
-    await message.answer(
-        "<b>⚙️ Гибкие настройки бота</b>\n"
-        "Нажмите пункт, чтобы включить/выключить, либо изменить значение.\n"
-        "Настройки персональные — у каждого владельца бизнес-подключения свои.",
-        reply_markup=settings_keyboard(settings),
-    )
+@router.callback_query(F.data.startswith("help:topic:"))
+async def help_topic(call: CallbackQuery) -> None:
+    key = call.data.split(":", 2)[2]
+    body = HELP_TOPIC_BODIES.get(key, "Пока нет описания для этой темы.")
+    await call.message.edit_text(body, reply_markup=help_back_keyboard())
+    await call.answer()
 
 
-@router.callback_query(F.data == CB_CLOSE)
-async def cb_close(call: CallbackQuery) -> None:
+@router.callback_query(F.data == "help:back")
+async def help_back(call: CallbackQuery) -> None:
+    await call.message.edit_text(HELP_INTRO, reply_markup=help_topics_keyboard())
+    await call.answer()
+
+
+@router.callback_query(F.data == "help:close")
+async def help_close(call: CallbackQuery) -> None:
     if call.message:
         await call.message.delete()
     await call.answer()
 
 
-@router.callback_query(F.data.startswith(CB_TOGGLE))
-async def cb_toggle(call: CallbackQuery, storage: Storage) -> None:
-    key = call.data[len(CB_TOGGLE):]
-    field = get_field(key)
-    if field is None or field.kind != "bool":
-        await call.answer("Неизвестная настройка", show_alert=True)
+# ---------------------------------------------------------------------- /settings
+@router.message(Command("settings"))
+async def cmd_settings(message: Message, storage: Storage) -> None:
+    owner_id = message.from_user.id
+    storage.db.ensure_owner(owner_id, is_admin=storage.is_admin(owner_id))
+    digest_count = storage.queue_count(owner_id)
+    await message.answer(
+        "<b>⚙️ Ваши настройки</b>\nВыберите раздел:",
+        reply_markup=main_settings_keyboard(digest_count),
+    )
+
+
+@router.callback_query(F.data == "us:close")
+async def us_close(call: CallbackQuery) -> None:
+    if call.message:
+        await call.message.delete()
+    await call.answer()
+
+
+@router.callback_query(F.data == "us:back")
+async def us_back(call: CallbackQuery, storage: Storage) -> None:
+    owner_id = call.from_user.id
+    digest_count = storage.queue_count(owner_id)
+    await call.message.edit_text(
+        "<b>⚙️ Ваши настройки</b>\nВыберите раздел:", reply_markup=main_settings_keyboard(digest_count)
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data == "us:noop")
+async def us_noop(call: CallbackQuery) -> None:
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("us:open:"))
+async def us_open(call: CallbackQuery, storage: Storage) -> None:
+    section = call.data.split(":", 2)[2]
+    owner_id = call.from_user.id
+
+    if section == "presets":
+        names = storage.preset_list(owner_id)
+        text = "<b>🗂 Пресеты .say</b>\n" + (
+            "Ваши пресеты:" if names else "У вас пока нет пресетов."
+        )
+        await call.message.edit_text(text, reply_markup=presets_keyboard(names))
+        await call.answer()
         return
+
+    settings = storage.get_settings(owner_id)
+    title = SECTION_TITLES.get(section, section)
+    await call.message.edit_text(f"<b>{title}</b>", reply_markup=section_keyboard(section, settings))
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("us:toggle:"))
+async def us_toggle(call: CallbackQuery, storage: Storage) -> None:
+    _, _, section, key = call.data.split(":", 3)
     settings = storage.toggle_setting(call.from_user.id, key)
-    await call.message.edit_reply_markup(reply_markup=settings_keyboard(settings))
+    await call.message.edit_reply_markup(reply_markup=section_keyboard(section, settings))
     await call.answer("Сохранено")
 
 
-@router.callback_query(F.data.startswith(CB_EDIT))
-async def cb_edit(call: CallbackQuery) -> None:
-    key = call.data[len(CB_EDIT):]
-    field = get_field(key)
+@router.callback_query(F.data.startswith("us:cycle:"))
+async def us_cycle(call: CallbackQuery, storage: Storage) -> None:
+    _, _, section, key = call.data.split(":", 3)
+    field = get_owner_field(key)
     if field is None:
         await call.answer("Неизвестная настройка", show_alert=True)
         return
-    _pending_edit[call.from_user.id] = key
+    current_settings = storage.get_settings(call.from_user.id)
+    new_value = next_cycle_value(field, getattr(current_settings, key))
+    settings = storage.update_setting(call.from_user.id, key, new_value)
+    await call.message.edit_reply_markup(reply_markup=section_keyboard(section, settings))
+    await call.answer("Сохранено")
+
+
+@router.callback_query(F.data.startswith("us:edit:"))
+async def us_edit(call: CallbackQuery) -> None:
+    _, _, section, key = call.data.split(":", 3)
+    field = get_owner_field(key)
+    if field is None:
+        await call.answer("Неизвестная настройка", show_alert=True)
+        return
+    _pending[call.from_user.id] = {"kind": "edit_user", "section": section, "key": key}
     await call.answer()
     await call.message.answer(f"Введите новое значение для «{field.label}» одним сообщением:")
 
 
-@router.message(F.chat.type == "private", F.text, ~F.text.startswith("/"))
-async def private_text_input(message: Message, storage: Storage) -> None:
-    key = _pending_edit.pop(message.from_user.id, None)
-    if key is None:
+@router.callback_query(F.data == "us:afktext")
+async def us_afktext(call: CallbackQuery) -> None:
+    _pending[call.from_user.id] = {"kind": "afk_text"}
+    await call.answer()
+    await call.message.answer("Отправьте текст автоответа для AFK-режима одним сообщением:")
+
+
+@router.callback_query(F.data == "us:digest")
+async def us_digest(call: CallbackQuery, storage: Storage) -> None:
+    owner_id = call.from_user.id
+    rows = storage.queue_list(owner_id)
+    if not rows:
+        await call.answer("Очередь пуста", show_alert=True)
         return
-    field = get_field(key)
-    if field is None:
-        return
-    try:
-        value = parse_value(field.kind, message.text)
-    except ValueError as exc:
-        _pending_edit[message.from_user.id] = key
-        await message.answer(f"❌ Некорректное значение: {exc}. Попробуйте ещё раз.")
-        return
-    settings = storage.update_setting(message.from_user.id, key, value)
-    await message.answer(
-        f"✅ Сохранено: {field.label} = {value}",
-        reply_markup=settings_keyboard(settings),
+    await call.answer()
+    for row in rows:
+        media = None
+        if row["media_kind"] and row["media_file_id"]:
+            local_path = Path(row["media_path"]) if row["media_path"] else None
+            media = MediaRef(
+                kind=row["media_kind"],
+                file_id=row["media_file_id"],
+                local_path=local_path if local_path and local_path.exists() else None,
+            )
+        if media is not None:
+            await send_media_copy(call.bot, call.message.chat.id, media, caption=row["payload"])
+        else:
+            await call.bot.send_message(call.message.chat.id, row["payload"])
+    storage.queue_clear(owner_id)
+    digest_count = storage.queue_count(owner_id)
+    await call.message.edit_text(
+        "<b>⚙️ Ваши настройки</b>\nВыберите раздел:", reply_markup=main_settings_keyboard(digest_count)
     )
 
 
-# ------------------------------------------------------------------- admin --
+# ---------------------------------------------------------------- say presets
+@router.callback_query(F.data.startswith("us:preset:del:"))
+async def us_preset_del(call: CallbackQuery, storage: Storage) -> None:
+    name = call.data.split(":", 3)[3]
+    storage.preset_delete(call.from_user.id, name)
+    names = storage.preset_list(call.from_user.id)
+    await call.message.edit_reply_markup(reply_markup=presets_keyboard(names))
+    await call.answer("Удалено")
 
 
-@router.message(Command("admin"))
-async def cmd_admin(message: Message, storage: Storage, config: Config, backup: BackupManager) -> None:
-    if not _is_admin(message.from_user.id, config):
+@router.callback_query(F.data == "us:preset:add")
+async def us_preset_add(call: CallbackQuery) -> None:
+    _pending[call.from_user.id] = {"kind": "preset_name"}
+    await call.answer()
+    await call.message.answer("Введите имя нового пресета (одно слово, буквы/цифры/подчёркивание):")
+
+
+@router.callback_query(F.data == "us:preset:done")
+async def us_preset_done(call: CallbackQuery, storage: Storage) -> None:
+    state = _pending.pop(call.from_user.id, None)
+    if not state or state.get("kind") != "preset_items":
+        await call.answer()
         return
-    text = format_admin_overview(
+    items = state.get("items", [])
+    if items:
+        storage.preset_add(call.from_user.id, state["name"], items)
+        await call.message.answer(f"✅ Пресет «{state['name']}» сохранён ({len(items)} сообщ.)")
+    else:
+        await call.message.answer("❌ Пресет пуст, отменено.")
+    await call.answer()
+
+
+@router.callback_query(F.data == "us:preset:cancel")
+async def us_preset_cancel(call: CallbackQuery) -> None:
+    _pending.pop(call.from_user.id, None)
+    await call.message.answer("Отменено.")
+    await call.answer()
+
+
+# -------------------------------------------------------------------------- /admin
+def _admin_overview_text(storage: Storage, backup: BackupManager) -> str:
+    settings = storage.get_global()
+    return format_admin_overview(
         owners_count=storage.db.owners_count(),
         connections_count=storage.db.connections_count(),
         db_size_mb=storage.db.file_size_bytes() / (1024 * 1024),
         db_messages=storage.db.count_messages(None),
         db_messages_total=storage.db.count_all_messages(),
         media_mb=directory_size_bytes(MEDIA_DIR) / (1024 * 1024),
-        backup_enabled=config.backup.enabled,
-        backup_interval_hours=config.backup.interval_hours,
+        backup_enabled=settings.backup_enabled,
+        backup_interval_hours=settings.backup_interval_hours,
         last_backup_ts=backup.last_backup_ts,
     )
-    await message.answer(
-        text
-        + "\n\n<i>Команды:</i> /users · /backupnow · /broadcast текст"
-    )
 
 
-@router.message(Command("users"))
-async def cmd_users(message: Message, storage: Storage, config: Config) -> None:
-    if not _is_admin(message.from_user.id, config):
+@router.message(Command("admin"))
+async def cmd_admin(message: Message, storage: Storage, backup: BackupManager) -> None:
+    if not storage.is_admin(message.from_user.id):
         return
-    rows = storage.db.all_connections()
-    if not rows:
-        await message.answer("Пока нет ни одного подключённого бизнес-аккаунта.")
-        return
-    lines = ["<b>👥 Подключения</b>"]
-    for row in rows:
-        status = "🟢" if row["is_enabled"] else "🔴"
-        lines.append(
-            f"{status} owner=<code>{row['owner_id']}</code> "
-            f"conn=<code>{row['connection_id']}</code>"
-        )
-    await message.answer("\n".join(lines))
+    await message.answer(_admin_overview_text(storage, backup), reply_markup=admin_main_keyboard())
 
 
-@router.message(Command("backupnow"))
-async def cmd_backup_now(message: Message, storage: Storage, config: Config, backup: BackupManager) -> None:
-    if not _is_admin(message.from_user.id, config):
+@router.callback_query(F.data == "ad:close")
+async def ad_close(call: CallbackQuery, storage: Storage) -> None:
+    if not storage.is_admin(call.from_user.id):
+        await call.answer()
         return
-    await message.answer("⏳ Делаю бэкап и отправляю…")
+    if call.message:
+        await call.message.delete()
+    await call.answer()
+
+
+@router.callback_query(F.data == "ad:back")
+async def ad_back(call: CallbackQuery, storage: Storage, backup: BackupManager) -> None:
+    if not storage.is_admin(call.from_user.id):
+        await call.answer()
+        return
+    await call.message.edit_text(_admin_overview_text(storage, backup), reply_markup=admin_main_keyboard())
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("ad:open:"))
+async def ad_open(call: CallbackQuery, storage: Storage) -> None:
+    if not storage.is_admin(call.from_user.id):
+        await call.answer()
+        return
+    section = call.data.split(":", 2)[2]
+
+    if section == "users":
+        rows = storage.db.all_connections()
+        if not rows:
+            text = "Пока нет ни одного подключённого бизнес-аккаунта."
+        else:
+            lines = ["<b>👥 Подключения</b>"]
+            for row in rows:
+                status = "🟢" if row["is_enabled"] else "🔴"
+                lines.append(f"{status} owner=<code>{row['owner_id']}</code> conn=<code>{row['connection_id']}</code>")
+            text = "\n".join(lines)
+        await call.message.edit_text(text, reply_markup=admin_back_keyboard())
+        await call.answer()
+        return
+
+    settings = storage.get_global()
+    title = ADMIN_SECTION_TITLES.get(section, section)
+    await call.message.edit_text(f"<b>{title}</b>", reply_markup=admin_section_keyboard(section, settings))
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("ad:toggle:"))
+async def ad_toggle(call: CallbackQuery, storage: Storage) -> None:
+    if not storage.is_admin(call.from_user.id):
+        await call.answer()
+        return
+    _, _, section, key = call.data.split(":", 3)
+    settings = storage.toggle_global(key)
+    await call.message.edit_reply_markup(reply_markup=admin_section_keyboard(section, settings))
+    await call.answer("Сохранено")
+
+
+@router.callback_query(F.data.startswith("ad:edit:"))
+async def ad_edit(call: CallbackQuery, storage: Storage) -> None:
+    if not storage.is_admin(call.from_user.id):
+        await call.answer()
+        return
+    _, _, section, key = call.data.split(":", 3)
+    field = get_admin_field(key)
+    if field is None:
+        await call.answer("Неизвестная настройка", show_alert=True)
+        return
+    _pending[call.from_user.id] = {"kind": "edit_admin", "section": section, "key": key}
+    await call.answer()
+    await call.message.answer(f"Введите новое значение для «{field.label}» одним сообщением:")
+
+
+@router.callback_query(F.data == "ad:backupnow")
+async def ad_backupnow(call: CallbackQuery, storage: Storage, backup: BackupManager) -> None:
+    if not storage.is_admin(call.from_user.id):
+        await call.answer()
+        return
+    await call.answer("Делаю бэкап…")
     ok = await backup.backup_now()
-    if ok:
-        await message.answer("✅ Бэкап отправлен, локальная история схлопнута.")
-    else:
-        await message.answer("❌ Не удалось выполнить бэкап (см. логи).")
+    await call.message.answer("✅ Бэкап отправлен, локальная история схлопнута." if ok else "❌ Не удалось выполнить бэкап (см. логи).")
 
 
-@router.message(Command("broadcast"))
-async def cmd_broadcast(message: Message, storage: Storage, config: Config) -> None:
-    if not _is_admin(message.from_user.id, config):
+@router.callback_query(F.data == "ad:broadcast")
+async def ad_broadcast(call: CallbackQuery, storage: Storage) -> None:
+    if not storage.is_admin(call.from_user.id):
+        await call.answer()
         return
-    text = (message.text or "").split(maxsplit=1)
-    if len(text) < 2:
-        await message.answer("Использование: /broadcast текст сообщения")
+    _pending[call.from_user.id] = {"kind": "broadcast"}
+    await call.answer()
+    await call.message.answer("Отправьте текст рассылки одним сообщением — уйдёт всем подключённым владельцам:")
+
+
+@router.callback_query(F.data == "ad:cancel")
+async def ad_cancel(call: CallbackQuery) -> None:
+    _pending.pop(call.from_user.id, None)
+    await call.answer("Отменено")
+
+
+# ------------------------------------------------------------- catch-all private input
+@router.message(F.chat.type == "private")
+async def private_input(message: Message, storage: Storage) -> None:
+    user_id = message.from_user.id
+    state = _pending.get(user_id)
+    if state is None:
         return
-    payload = text[1]
-    rows = storage.db.all_connections()
-    sent = 0
-    for row in rows:
+
+    kind = state["kind"]
+
+    if kind == "edit_user":
+        field = get_owner_field(state["key"])
+        if field is None or not message.text:
+            return
         try:
-            await message.bot.send_message(chat_id=row["user_chat_id"], text=f"📢 {payload}")
-            sent += 1
-        except Exception:
-            logger.exception("Не удалось отправить broadcast owner=%s", row["owner_id"])
-    await message.answer(f"Отправлено {sent} из {len(rows)}.")
+            value = parse_value(field.kind, message.text)
+        except ValueError as exc:
+            await message.answer(f"❌ Некорректное значение: {exc}. Попробуйте ещё раз.")
+            return
+        settings = storage.update_setting(user_id, state["key"], value)
+        _pending.pop(user_id, None)
+        await message.answer(
+            f"✅ Сохранено: {field.label} = {value}",
+            reply_markup=section_keyboard(state["section"], settings),
+        )
+        return
+
+    if kind == "edit_admin":
+        if not storage.is_admin(user_id):
+            _pending.pop(user_id, None)
+            return
+        field = get_admin_field(state["key"])
+        if field is None or not message.text:
+            return
+        try:
+            value = parse_value(field.kind, message.text)
+        except ValueError as exc:
+            await message.answer(f"❌ Некорректное значение: {exc}. Попробуйте ещё раз.")
+            return
+        settings = storage.update_global(state["key"], value)
+        _pending.pop(user_id, None)
+        await message.answer(
+            f"✅ Сохранено: {field.label} = {value}",
+            reply_markup=admin_section_keyboard(state["section"], settings),
+        )
+        return
+
+    if kind == "afk_text":
+        if not message.text:
+            await message.answer("❌ Нужен именно текст. Попробуйте ещё раз:")
+            return
+        storage.update_setting(user_id, "afk_text", message.text)
+        _pending.pop(user_id, None)
+        await message.answer("✅ Текст AFK-автоответа сохранён.")
+        return
+
+    if kind == "preset_name":
+        name = (message.text or "").strip().lower()
+        if not name or not name.replace("_", "").isalnum():
+            await message.answer("❌ Имя должно быть одним словом: буквы/цифры/подчёркивание. Попробуйте снова:")
+            return
+        _pending[user_id] = {"kind": "preset_items", "name": name, "items": []}
+        await message.answer(
+            f"Пресет «{name}»: отправьте одно или несколько сообщений (текст, голосовые, кружки, фото и т.д.) — "
+            "они будут отправляться по очереди при вызове <code>.say " + name + "</code>. "
+            "Когда закончите — нажмите «Готово».",
+            reply_markup=preset_creation_keyboard(),
+        )
+        return
+
+    if kind == "preset_items":
+        item = _message_to_preset_item(message)
+        if item is None:
+            await message.answer("⚠️ Этот тип сообщения не поддерживается в пресетах, пропущено.", reply_markup=preset_creation_keyboard())
+            return
+        state["items"].append(item)
+        await message.answer(
+            f"Добавлено ({len(state['items'])}). Ещё сообщение или нажмите «Готово».",
+            reply_markup=preset_creation_keyboard(),
+        )
+        return
+
+    if kind == "broadcast":
+        if not storage.is_admin(user_id):
+            _pending.pop(user_id, None)
+            return
+        text = message.text or message.caption
+        if not text:
+            await message.answer("❌ Поддерживается только текст. Попробуйте ещё раз:")
+            return
+        _pending.pop(user_id, None)
+        rows = storage.db.all_connections()
+        sent = 0
+        for row in rows:
+            try:
+                await message.bot.send_message(chat_id=row["user_chat_id"], text=f"📢 {text}")
+                sent += 1
+            except Exception:
+                logger.exception("Не удалось отправить рассылку owner=%s", row["owner_id"])
+        await message.answer(f"Отправлено {sent} из {len(rows)}.")
+        return
+
+
+def _message_to_preset_item(message: Message) -> dict | None:
+    media = extract_media(message)
+    if media is not None:
+        return {"type": "media", "kind": media.kind, "file_id": media.file_id}
+    text = message.text or message.caption
+    if text:
+        return {"type": "text", "content": text}
+    return None

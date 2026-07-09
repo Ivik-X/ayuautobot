@@ -10,7 +10,6 @@ from pathlib import Path
 from aiogram import Bot
 from aiogram.types import FSInputFile
 
-from bot.config import Config
 from bot.media import MEDIA_DIR, directory_size_bytes, enforce_media_quota
 from bot.storage import Storage
 
@@ -20,42 +19,44 @@ TMP_DIR = Path(__file__).resolve().parent.parent / "data" / "tmp"
 
 
 class BackupManager:
-    """Раз в BACKUP_INTERVAL_HOURS часов:
+    """Раз в backup_interval_hours часов (настройка админа, живёт в БД):
 
     1. делает консистентный снимок SQLite (не останавливая бота);
     2. гзипует и отправляет админам в личку одним файлом;
-    3. после успешной отправки схлопывает локальную историю (VACUUM),
-       чтобы реально освободить место на диске;
+    3. после успешной отправки схлопывает локальную историю (VACUUM);
     4. попутно следит за квотой на медиа-файлы.
 
-    Это единственный способ держать 10 GB NVMe в порядке при постоянно
-    растущей истории переписок — вся "холодная" история живёт у админа в ЛС,
-    а на сервере остаётся только горячий хвост.
+    Все параметры (интервал, что хранить локально, включён ли автобэкап)
+    редактируются на лету через /admin — без передеплоя контейнера.
     """
 
-    def __init__(self, bot: Bot, storage: Storage, config: Config) -> None:
+    def __init__(self, bot: Bot, storage: Storage, admin_ids: set[int]) -> None:
         self._bot = bot
         self._storage = storage
-        self._config = config
+        self._admin_ids = admin_ids
         self.last_backup_ts: float | None = None
 
     async def run_loop(self) -> None:
-        if not self._config.backup.enabled or not self._config.admin_ids:
-            logger.info("Автобэкап отключён (BACKUP_ENABLED=false или нет ADMIN_IDS)")
+        if not self._admin_ids:
+            logger.info("Автобэкап отключён: не задан ни один ADMIN_IDS")
             return
-        interval = self._config.backup.interval_hours * 3600
         while True:
+            settings = self._storage.get_global()
+            interval = max(settings.backup_interval_hours, 0.1) * 3600
             await asyncio.sleep(interval)
+            if not self._storage.get_global().backup_enabled:
+                continue
             try:
                 await self.backup_now()
             except Exception:
                 logger.exception("Ошибка автобэкапа")
 
     async def backup_now(self) -> bool:
-        if not self._config.admin_ids:
+        if not self._admin_ids:
             logger.warning("Бэкап пропущен: не задан ни один ADMIN_IDS")
             return False
 
+        settings = self._storage.get_global()
         TMP_DIR.mkdir(parents=True, exist_ok=True)
         stamp = time.strftime("%Y%m%d-%H%M%S")
         snapshot_path = TMP_DIR / f"backup-{stamp}.sqlite3"
@@ -64,7 +65,7 @@ class BackupManager:
         try:
             self._storage.db.snapshot(snapshot_path)
 
-            if self._config.backup.compress:
+            if settings.backup_compress:
                 gz_path = snapshot_path.with_suffix(snapshot_path.suffix + ".gz")
                 with open(snapshot_path, "rb") as src, gzip.open(gz_path, "wb") as dst:
                     shutil.copyfileobj(src, dst)
@@ -79,7 +80,7 @@ class BackupManager:
             )
 
             sent_to_anyone = False
-            for admin_id in self._config.admin_ids:
+            for admin_id in self._admin_ids:
                 try:
                     await self._bot.send_document(
                         chat_id=admin_id,
@@ -94,8 +95,8 @@ class BackupManager:
                 logger.error("Бэкап не удалось отправить ни одному админу — локальные данные НЕ удаляются")
                 return False
 
-            removed_rows = self._storage.db.trim_after_backup(self._config.backup.keep_local_hours)
-            removed_media = enforce_media_quota(MEDIA_DIR, self._config.media.max_total_mb)
+            removed_rows = self._storage.db.trim_after_backup(settings.backup_keep_local_hours)
+            removed_media = enforce_media_quota(MEDIA_DIR, settings.media_max_total_mb)
             self.last_backup_ts = time.time()
             logger.info(
                 "Бэкап отправлен (%.2f МБ), локально удалено %s записей и %s медиафайлов",

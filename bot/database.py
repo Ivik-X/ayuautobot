@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import shutil
 import sqlite3
 import time
 from pathlib import Path
@@ -15,16 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 class Database:
-    """Единая SQLite БД для всего бота.
-
-    Рассчитана на слабый сервер (1 ядро / 1GB RAM / 10GB NVMe):
-    - WAL + NORMAL synchronous — минимум лишних fsync;
-    - все данные (сообщения, настройки, заметки, напоминания) в одном файле,
-      чтобы не плодить дескрипторы и упростить бэкап;
-    - есть snapshot() для консистентного бэкапа "на лету" через sqlite backup API;
-    - есть trim_after_backup() чтобы после отправки бэкапа админу схлопнуть
-      локальную историю и освободить место на диске (VACUUM).
-    """
+    """Единая SQLite БД для всего бота (см. README про архитектуру для слабого сервера)."""
 
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -33,22 +23,6 @@ class Database:
         self._conn.row_factory = sqlite3.Row
         self._init_schema()
         self._migrate()
-
-    def _migrate(self) -> None:
-        """Аккуратно докатывает схему для БД, оставшихся от старой версии бота
-        (там были только таблицы messages/chat_stats, без owner_id — новые
-        таблицы owners/connections/notes/reminders создаёт CREATE TABLE IF NOT
-        EXISTS в _init_schema). Ничего не удаляет, только добавляет недостающее.
-        """
-        columns = {
-            row["name"] for row in self._conn.execute("PRAGMA table_info(messages)").fetchall()
-        }
-        if "owner_id" not in columns:
-            logger.info("Миграция БД: добавляю колонку messages.owner_id")
-            self._conn.execute("ALTER TABLE messages ADD COLUMN owner_id INTEGER")
-            self._conn.commit()
-        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_owner ON messages(owner_id)")
-        self._conn.commit()
 
     def close(self) -> None:
         self._conn.close()
@@ -94,6 +68,7 @@ class Database:
                 cached_at     REAL NOT NULL,
                 edited_at     REAL,
                 deleted_at    REAL,
+                bot_caused    INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (connection_id, chat_id, message_id)
             );
 
@@ -106,28 +81,51 @@ class Database:
                 PRIMARY KEY (connection_id, chat_id, kind)
             );
 
-            CREATE TABLE IF NOT EXISTS notes (
-                owner_id  INTEGER NOT NULL,
-                name      TEXT NOT NULL,
-                content   TEXT NOT NULL,
+            CREATE TABLE IF NOT EXISTS say_presets (
+                owner_id   INTEGER NOT NULL,
+                name       TEXT NOT NULL,
+                items      TEXT NOT NULL DEFAULT '[]',
                 updated_at REAL NOT NULL,
                 PRIMARY KEY (owner_id, name)
             );
 
-            CREATE TABLE IF NOT EXISTS reminders (
+            CREATE TABLE IF NOT EXISTS notifications_queue (
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
                 owner_id      INTEGER NOT NULL,
-                connection_id TEXT NOT NULL,
-                chat_id       INTEGER NOT NULL,
-                fire_at       REAL NOT NULL,
-                text          TEXT NOT NULL,
+                kind          TEXT NOT NULL,
+                payload       TEXT NOT NULL,
+                media_kind    TEXT,
+                media_file_id TEXT,
+                media_path    TEXT,
                 created_at    REAL NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS global_settings (
+                id   INTEGER PRIMARY KEY CHECK (id = 1),
+                data TEXT NOT NULL DEFAULT '{}'
             );
 
             CREATE INDEX IF NOT EXISTS idx_messages_cached_at ON messages(cached_at);
             CREATE INDEX IF NOT EXISTS idx_messages_deleted_at ON messages(deleted_at);
+            CREATE INDEX IF NOT EXISTS idx_notifications_owner ON notifications_queue(owner_id);
             """
         )
+        self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Докатывает схему для БД, оставшихся от предыдущих версий бота."""
+        columns = {
+            row["name"] for row in self._conn.execute("PRAGMA table_info(messages)").fetchall()
+        }
+        if "owner_id" not in columns:
+            logger.info("Миграция БД: добавляю колонку messages.owner_id")
+            self._conn.execute("ALTER TABLE messages ADD COLUMN owner_id INTEGER")
+            self._conn.commit()
+        if "bot_caused" not in columns:
+            logger.info("Миграция БД: добавляю колонку messages.bot_caused")
+            self._conn.execute("ALTER TABLE messages ADD COLUMN bot_caused INTEGER NOT NULL DEFAULT 0")
+            self._conn.commit()
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_owner ON messages(owner_id)")
         self._conn.commit()
 
     # ------------------------------------------------------------------ owners
@@ -158,13 +156,12 @@ class Database:
         )
         self._conn.commit()
 
-    def all_owner_ids(self) -> list[int]:
-        rows = self._conn.execute("SELECT owner_id FROM owners").fetchall()
-        return [int(r["owner_id"]) for r in rows]
-
     def owners_count(self) -> int:
         row = self._conn.execute("SELECT COUNT(*) FROM owners").fetchone()
         return int(row[0]) if row else 0
+
+    def all_owners(self) -> list[sqlite3.Row]:
+        return self._conn.execute("SELECT * FROM owners ORDER BY last_seen DESC").fetchall()
 
     # -------------------------------------------------------------- connections
     def upsert_connection(self, connection_id: str, owner_id: int, user_chat_id: int, is_enabled: bool) -> None:
@@ -196,7 +193,7 @@ class Database:
         return int(row[0]) if row else 0
 
     # ---------------------------------------------------------------- messages
-    def upsert_message(self, cached: CachedMessage, chat_title: str, owner_id: int | None) -> None:
+    def upsert_message(self, cached: CachedMessage, chat_title: str, owner_id: int | None, *, bot_caused: bool = False) -> None:
         is_new = self._conn.execute(
             "SELECT 1 FROM messages WHERE connection_id=? AND chat_id=? AND message_id=?",
             (cached.connection_id, cached.chat_id, cached.message_id),
@@ -212,8 +209,8 @@ class Database:
             INSERT INTO messages (
                 connection_id, chat_id, message_id, owner_id, chat_title,
                 from_user_id, from_user_name, content, kind, flags,
-                media_kind, media_file_id, media_path, cached_at, edited_at, deleted_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+                media_kind, media_file_id, media_path, cached_at, edited_at, deleted_at, bot_caused
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)
             ON CONFLICT(connection_id, chat_id, message_id) DO UPDATE SET
                 from_user_name=excluded.from_user_name,
                 content=excluded.content,
@@ -227,7 +224,7 @@ class Database:
             (
                 cached.connection_id, cached.chat_id, cached.message_id, owner_id, chat_title,
                 cached.from_user_id, cached.from_user_name, cached.content, cached.kind, flags_json,
-                media_kind, media_file_id, media_path, cached.cached_at,
+                media_kind, media_file_id, media_path, cached.cached_at, int(bot_caused),
                 time.time(),
             ),
         )
@@ -261,6 +258,20 @@ class Database:
         ).fetchone()
         return self._row_to_cached(row) if row else None
 
+    def get_message_any(self, connection_id: str, chat_id: int, message_id: int) -> CachedMessage | None:
+        """Как get_message, но не фильтрует уже помеченные удалёнными (для digest-очереди)."""
+        row = self._conn.execute(
+            "SELECT * FROM messages WHERE connection_id=? AND chat_id=? AND message_id=?",
+            (connection_id, chat_id, message_id),
+        ).fetchone()
+        if row is not None:
+            return self._row_to_cached(row)
+        row = self._conn.execute(
+            "SELECT * FROM messages WHERE connection_id=? AND message_id=? LIMIT 1",
+            (connection_id, message_id),
+        ).fetchone()
+        return self._row_to_cached(row) if row else None
+
     def mark_deleted(self, connection_id: str, chat_id: int, message_id: int) -> CachedMessage | None:
         cached = self.get_message(connection_id, chat_id, message_id)
         if cached is None:
@@ -277,6 +288,13 @@ class Database:
         self._conn.commit()
         return cached
 
+    def is_bot_caused(self, connection_id: str, chat_id: int, message_id: int) -> bool:
+        row = self._conn.execute(
+            "SELECT bot_caused FROM messages WHERE connection_id=? AND message_id=? LIMIT 1",
+            (connection_id, message_id),
+        ).fetchone()
+        return bool(row["bot_caused"]) if row else False
+
     def count_messages(self, connection_id: str | None = None) -> int:
         if connection_id is None:
             row = self._conn.execute("SELECT COUNT(*) FROM messages WHERE deleted_at IS NULL").fetchone()
@@ -289,12 +307,6 @@ class Database:
 
     def count_all_messages(self) -> int:
         row = self._conn.execute("SELECT COUNT(*) FROM messages").fetchone()
-        return int(row[0]) if row else 0
-
-    def media_files_count(self) -> int:
-        row = self._conn.execute(
-            "SELECT COUNT(*) FROM messages WHERE media_path IS NOT NULL AND deleted_at IS NULL"
-        ).fetchone()
         return int(row[0]) if row else 0
 
     def chat_stats(self, connection_id: str) -> list[tuple[int, ChatStats]]:
@@ -339,19 +351,6 @@ class Database:
         self._conn.commit()
         return cur.rowcount
 
-    def persist_media_copy(self, source: Path, media_dir: Path, message_id: int, kind: str) -> Path | None:
-        if not source.exists():
-            return None
-        media_dir.mkdir(parents=True, exist_ok=True)
-        ext = source.suffix or ".bin"
-        dest = media_dir / f"{message_id}_{kind}{ext}"
-        try:
-            shutil.copy2(source, dest)
-            return dest
-        except OSError:
-            logger.exception("Не удалось сохранить медиа в БД")
-            return None
-
     def _row_to_cached(self, row: sqlite3.Row) -> CachedMessage:
         flags = json.loads(row["flags"]) if row["flags"] else None
         media = None
@@ -375,61 +374,94 @@ class Database:
             kind=row["kind"],
         )
 
-    # ------------------------------------------------------------------- notes
-    def note_set(self, owner_id: int, name: str, content: str) -> None:
+    # ------------------------------------------------------------- say presets
+    def preset_set(self, owner_id: int, name: str, items: list[dict]) -> None:
         self._conn.execute(
             """
-            INSERT INTO notes (owner_id, name, content, updated_at) VALUES (?, ?, ?, ?)
-            ON CONFLICT(owner_id, name) DO UPDATE SET content=excluded.content, updated_at=excluded.updated_at
+            INSERT INTO say_presets (owner_id, name, items, updated_at) VALUES (?, ?, ?, ?)
+            ON CONFLICT(owner_id, name) DO UPDATE SET items=excluded.items, updated_at=excluded.updated_at
             """,
-            (owner_id, name.lower(), content, time.time()),
+            (owner_id, name.lower(), json.dumps(items, ensure_ascii=False), time.time()),
         )
         self._conn.commit()
 
-    def note_get(self, owner_id: int, name: str) -> str | None:
+    def preset_get(self, owner_id: int, name: str) -> list[dict] | None:
         row = self._conn.execute(
-            "SELECT content FROM notes WHERE owner_id=? AND name=?", (owner_id, name.lower())
+            "SELECT items FROM say_presets WHERE owner_id=? AND name=?", (owner_id, name.lower())
         ).fetchone()
-        return row["content"] if row else None
+        if row is None:
+            return None
+        try:
+            return json.loads(row["items"])
+        except (json.JSONDecodeError, TypeError):
+            return []
 
-    def note_delete(self, owner_id: int, name: str) -> bool:
+    def preset_delete(self, owner_id: int, name: str) -> bool:
         cur = self._conn.execute(
-            "DELETE FROM notes WHERE owner_id=? AND name=?", (owner_id, name.lower())
+            "DELETE FROM say_presets WHERE owner_id=? AND name=?", (owner_id, name.lower())
         )
         self._conn.commit()
         return cur.rowcount > 0
 
-    def note_list(self, owner_id: int) -> list[str]:
+    def preset_list(self, owner_id: int) -> list[str]:
         rows = self._conn.execute(
-            "SELECT name FROM notes WHERE owner_id=? ORDER BY name", (owner_id,)
+            "SELECT name FROM say_presets WHERE owner_id=? ORDER BY name", (owner_id,)
         ).fetchall()
         return [r["name"] for r in rows]
 
-    # --------------------------------------------------------------- reminders
-    def reminder_add(self, owner_id: int, connection_id: str, chat_id: int, fire_at: float, text: str) -> int:
-        cur = self._conn.execute(
+    # ------------------------------------------------------- notifications queue
+    def queue_add(
+        self,
+        owner_id: int,
+        kind: str,
+        payload: str,
+        *,
+        media_kind: str | None = None,
+        media_file_id: str | None = None,
+        media_path: str | None = None,
+    ) -> None:
+        self._conn.execute(
             """
-            INSERT INTO reminders (owner_id, connection_id, chat_id, fire_at, text, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO notifications_queue
+                (owner_id, kind, payload, media_kind, media_file_id, media_path, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (owner_id, connection_id, chat_id, fire_at, text, time.time()),
+            (owner_id, kind, payload, media_kind, media_file_id, media_path, time.time()),
         )
         self._conn.commit()
-        return int(cur.lastrowid)
 
-    def reminder_delete(self, reminder_id: int) -> None:
-        self._conn.execute("DELETE FROM reminders WHERE id=?", (reminder_id,))
+    def queue_count(self, owner_id: int) -> int:
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM notifications_queue WHERE owner_id=?", (owner_id,)
+        ).fetchone()
+        return int(row[0]) if row else 0
+
+    def queue_list(self, owner_id: int) -> list[sqlite3.Row]:
+        return self._conn.execute(
+            "SELECT * FROM notifications_queue WHERE owner_id=? ORDER BY created_at", (owner_id,)
+        ).fetchall()
+
+    def queue_clear(self, owner_id: int) -> None:
+        self._conn.execute("DELETE FROM notifications_queue WHERE owner_id=?", (owner_id,))
         self._conn.commit()
 
-    def reminders_pending(self) -> list[sqlite3.Row]:
-        return self._conn.execute("SELECT * FROM reminders ORDER BY fire_at").fetchall()
+    # ------------------------------------------------------------- global settings
+    def get_global_settings_raw(self) -> str | None:
+        row = self._conn.execute("SELECT data FROM global_settings WHERE id=1").fetchone()
+        return row["data"] if row else None
+
+    def save_global_settings(self, data_json: str) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO global_settings (id, data) VALUES (1, ?)
+            ON CONFLICT(id) DO UPDATE SET data=excluded.data
+            """,
+            (data_json,),
+        )
+        self._conn.commit()
 
     # -------------------------------------------------------------- backup/ops
     def snapshot(self, dest_path: Path) -> Path:
-        """Консистентный снимок БД через встроенный SQLite backup API.
-
-        Работает без остановки бота (WAL позволяет читать во время записи).
-        """
         dest_path.parent.mkdir(parents=True, exist_ok=True)
         dest_conn = sqlite3.connect(dest_path)
         try:
@@ -439,12 +471,6 @@ class Database:
         return dest_path
 
     def trim_after_backup(self, keep_hours: float) -> int:
-        """Схлопывает локальную историю после успешной отправки бэкапа админу.
-
-        Полная история уже уехала админу в ЛС файлом — на диске оставляем
-        только "горячий" хвост (keep_hours), остальное удаляем и делаем VACUUM,
-        чтобы реально освободить место на NVMe.
-        """
         removed = self.purge_older_than(keep_hours)
         try:
             self._conn.execute("VACUUM")

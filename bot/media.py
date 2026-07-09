@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from dataclasses import dataclass
@@ -21,6 +22,8 @@ class MediaRef:
     local_path: Path | None = None
     mime_type: str | None = None
     file_name: str | None = None
+    is_animated: bool = False
+    is_video: bool = False
 
 
 def extract_media(message: Message) -> MediaRef | None:
@@ -72,6 +75,8 @@ def extract_media(message: Message) -> MediaRef | None:
             file_id=message.sticker.file_id,
             mime_type="image/webp",
             file_name=message.sticker.emoji,
+            is_animated=message.sticker.is_animated,
+            is_video=message.sticker.is_video,
         )
 
     return None
@@ -98,15 +103,35 @@ async def download_media(bot: Bot, media: MediaRef, message_id: int, connection_
     ext = _guess_extension(media)
     destination = directory / f"{message_id}_{media.kind}{ext}"
 
-    try:
-        tg_file = await bot.get_file(media.file_id)
-        if tg_file.file_path:
-            await bot.download_file(tg_file.file_path, destination=destination)
-            media.local_path = destination
-    except Exception:
-        logger.exception("Не удалось скачать медиа %s", media.kind)
+    for attempt in range(2):
+        try:
+            tg_file = await bot.get_file(media.file_id)
+            if tg_file.file_path:
+                await bot.download_file(tg_file.file_path, destination=destination)
+                media.local_path = destination
+            return media
+        except Exception:
+            if attempt == 0:
+                # Одноразовые/защищённые медиа иногда не отдаются с первой попытки —
+                # пробуем ещё раз почти сразу, пока файл не "протух" на серверах Telegram.
+                await asyncio.sleep(0.3)
+                continue
+            logger.exception("Не удалось скачать медиа %s (защищённый/одноразовый контент?)", media.kind)
 
     return media
+
+
+async def download_bytes(bot: Bot, file_id: str) -> bytes | None:
+    """Скачивает файл в память (без записи на диск) — для антиспойлера/анонимных стикеров."""
+    try:
+        tg_file = await bot.get_file(file_id)
+        if not tg_file.file_path:
+            return None
+        buffer = await bot.download_file(tg_file.file_path)
+        return buffer.read() if buffer else None
+    except Exception:
+        logger.exception("Не удалось скачать файл %s в память", file_id)
+        return None
 
 
 async def send_media_copy(
@@ -114,40 +139,42 @@ async def send_media_copy(
     owner_chat_id: int,
     media: MediaRef,
     caption: str | None = None,
+    *,
+    disable_notification: bool = False,
 ) -> None:
     source = FSInputFile(media.local_path) if media.local_path and media.local_path.exists() else media.file_id
 
     try:
         if media.kind == "photo":
-            await bot.send_photo(owner_chat_id, source, caption=caption)
+            await bot.send_photo(owner_chat_id, source, caption=caption, disable_notification=disable_notification)
             return
         if media.kind == "video":
-            await bot.send_video(owner_chat_id, source, caption=caption)
+            await bot.send_video(owner_chat_id, source, caption=caption, disable_notification=disable_notification)
             return
         if media.kind == "video_note":
-            await bot.send_video_note(owner_chat_id, source)
+            await bot.send_video_note(owner_chat_id, source, disable_notification=disable_notification)
             if caption:
-                await bot.send_message(owner_chat_id, caption)
+                await bot.send_message(owner_chat_id, caption, disable_notification=disable_notification)
             return
         if media.kind == "voice":
-            await bot.send_voice(owner_chat_id, source, caption=caption)
+            await bot.send_voice(owner_chat_id, source, caption=caption, disable_notification=disable_notification)
             return
         if media.kind == "audio":
-            await bot.send_audio(owner_chat_id, source, caption=caption)
+            await bot.send_audio(owner_chat_id, source, caption=caption, disable_notification=disable_notification)
             return
         if media.kind == "animation":
-            await bot.send_animation(owner_chat_id, source, caption=caption)
+            await bot.send_animation(owner_chat_id, source, caption=caption, disable_notification=disable_notification)
             return
         if media.kind == "sticker":
-            await bot.send_sticker(owner_chat_id, source)
+            await bot.send_sticker(owner_chat_id, source, disable_notification=disable_notification)
             if caption:
-                await bot.send_message(owner_chat_id, caption)
+                await bot.send_message(owner_chat_id, caption, disable_notification=disable_notification)
             return
-        await bot.send_document(owner_chat_id, source, caption=caption)
+        await bot.send_document(owner_chat_id, source, caption=caption, disable_notification=disable_notification)
     except Exception:
         logger.exception("Не удалось переслать медиа владельцу")
         if caption:
-            await bot.send_message(owner_chat_id, caption)
+            await bot.send_message(owner_chat_id, caption, disable_notification=disable_notification)
 
 
 def _guess_extension(media: MediaRef) -> str:
@@ -230,3 +257,32 @@ def enforce_media_quota(base_dir: Path, max_total_mb: int) -> int:
         except OSError:
             pass
     return removed
+
+
+async def send_media_to_chat(
+    bot: Bot,
+    connection_id: str,
+    chat_id: int,
+    media: "MediaRef",
+    caption: str | None = None,
+) -> None:
+    """Отправляет медиа в чат от имени бизнес-подключения (для .spam с реплаем на медиа/стикер)."""
+    source = FSInputFile(media.local_path) if media.local_path and media.local_path.exists() else media.file_id
+    kwargs = {"business_connection_id": connection_id}
+
+    if media.kind == "photo":
+        await bot.send_photo(chat_id, source, caption=caption, **kwargs)
+    elif media.kind == "video":
+        await bot.send_video(chat_id, source, caption=caption, **kwargs)
+    elif media.kind == "video_note":
+        await bot.send_video_note(chat_id, source, **kwargs)
+    elif media.kind == "voice":
+        await bot.send_voice(chat_id, source, caption=caption, **kwargs)
+    elif media.kind == "audio":
+        await bot.send_audio(chat_id, source, caption=caption, **kwargs)
+    elif media.kind == "animation":
+        await bot.send_animation(chat_id, source, caption=caption, **kwargs)
+    elif media.kind == "sticker":
+        await bot.send_sticker(chat_id, source, **kwargs)
+    else:
+        await bot.send_document(chat_id, source, caption=caption, **kwargs)

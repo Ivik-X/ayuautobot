@@ -6,24 +6,28 @@ from dataclasses import replace
 from aiogram.types import BusinessConnection, Message
 
 from bot.cache import LRUCache
-from bot.config import Config
 from bot.database import Database
 from bot.media import MediaRef, media_flags, unlink_media
 from bot.models import CachedMessage, MuteSession
-from bot.settings import OwnerSettings
+from bot.settings import GlobalSettings, OwnerSettings
 from bot.stats import ChatStats
 
 AFK_REPLY_COOLDOWN_SECONDS = 300
+DEFAULT_ADMIN_SETTINGS = GlobalSettings()
+DEFAULT_OWNER_SETTINGS = OwnerSettings()
 
 
 class Storage:
-    def __init__(self, db: Database, config: Config) -> None:
+    def __init__(self, db: Database, admin_ids: set[int]) -> None:
         self._db = db
-        self._config = config
+        self._admin_ids = admin_ids
         self._connections: dict[str, BusinessConnection] = {}
         self._owner_of_connection: dict[str, int] = {}
         self._settings_cache: dict[int, OwnerSettings] = {}
-        self._cache: LRUCache[tuple[str, int, int], CachedMessage] = LRUCache(config.cache.max_entries)
+        self._global_settings: GlobalSettings | None = None
+        self._cache: LRUCache[tuple[str, int, int], CachedMessage] = LRUCache(
+            self.get_global().cache_max_entries
+        )
         self._mute: dict[tuple[str, int], MuteSession] = {}
         self._bot_deleted: set[tuple[str, int, int]] = set()
         self._afk_last_reply: dict[tuple[str, int], float] = {}
@@ -32,12 +36,15 @@ class Storage:
     def db(self) -> Database:
         return self._db
 
+    def is_admin(self, user_id: int) -> bool:
+        return user_id in self._admin_ids
+
     # ------------------------------------------------------------ connections
     def set_connection(self, connection: BusinessConnection) -> None:
         self._connections[connection.id] = connection
         owner_id = connection.user.id
         self._owner_of_connection[connection.id] = owner_id
-        self._db.ensure_owner(owner_id, is_admin=owner_id in self._config.admin_ids)
+        self._db.ensure_owner(owner_id, is_admin=self.is_admin(owner_id))
         self._db.upsert_connection(
             connection.id, owner_id, connection.user_chat_id, connection.is_enabled
         )
@@ -89,18 +96,18 @@ class Storage:
         if cached is not None:
             return cached
         raw = self._db.get_owner_settings_raw(owner_id)
-        settings = OwnerSettings.from_json(raw, self._config.default_settings)
+        settings = OwnerSettings.from_json(raw, DEFAULT_OWNER_SETTINGS)
         self._settings_cache[owner_id] = settings
         return settings
 
     def get_settings_for_connection(self, connection_id: str) -> OwnerSettings:
         owner_id = self.owner_user_id(connection_id)
         if owner_id is None:
-            return self._config.default_settings
+            return DEFAULT_OWNER_SETTINGS
         return self.get_settings(owner_id)
 
     def save_settings(self, owner_id: int, settings: OwnerSettings) -> None:
-        self._db.ensure_owner(owner_id, is_admin=owner_id in self._config.admin_ids)
+        self._db.ensure_owner(owner_id, is_admin=self.is_admin(owner_id))
         self._db.save_owner_settings(owner_id, settings.to_json())
         self._settings_cache[owner_id] = settings
 
@@ -115,6 +122,31 @@ class Storage:
         value = getattr(current, key)
         return self.update_setting(owner_id, key, not value)
 
+    # --------------------------------------------------------- global settings
+    def get_global(self) -> GlobalSettings:
+        if self._global_settings is not None:
+            return self._global_settings
+        raw = self._db.get_global_settings_raw()
+        settings = GlobalSettings.from_json(raw, DEFAULT_ADMIN_SETTINGS)
+        self._global_settings = settings
+        return settings
+
+    def save_global(self, settings: GlobalSettings) -> None:
+        self._db.save_global_settings(settings.to_json())
+        self._global_settings = settings
+        self._cache.set_max_size(settings.cache_max_entries)
+
+    def update_global(self, key: str, value) -> GlobalSettings:
+        current = self.get_global()
+        updated = replace(current, **{key: value})
+        self.save_global(updated)
+        return updated
+
+    def toggle_global(self, key: str) -> GlobalSettings:
+        current = self.get_global()
+        value = getattr(current, key)
+        return self.update_global(key, not value)
+
     # ---------------------------------------------------------------- caching
     def cache_message(
         self,
@@ -122,6 +154,7 @@ class Storage:
         message: Message,
         *,
         media: MediaRef | None = None,
+        bot_caused: bool = False,
     ) -> CachedMessage:
         kind = media.kind if media else _message_kind(message)
         title = message.chat.full_name or message.chat.username or str(message.chat.id)
@@ -144,10 +177,9 @@ class Storage:
             unlink_media(old.media)
         self._cache.set(key, cached)
 
-        owner_id = self.owner_user_id(connection_id)
-        settings = self.get_settings(owner_id) if owner_id is not None else self._config.default_settings
-        if settings.store_history:
-            self._db.upsert_message(cached, title, owner_id)
+        if self.get_global().store_all_messages:
+            owner_id = self.owner_user_id(connection_id)
+            self._db.upsert_message(cached, title, owner_id, bot_caused=bot_caused)
 
         return cached
 
@@ -180,7 +212,7 @@ class Storage:
         stale: list[tuple[str, int, int]] = []
         for key, item in self._cache.items():
             owner_id = self.owner_user_id(key[0])
-            settings = self.get_settings(owner_id) if owner_id is not None else self._config.default_settings
+            settings = self.get_settings(owner_id) if owner_id is not None else DEFAULT_OWNER_SETTINGS
             ttl_seconds = max(settings.cache_ttl_hours, 0) * 3600
             if ttl_seconds and now - item.cached_at > ttl_seconds:
                 stale.append(key)
@@ -196,15 +228,6 @@ class Storage:
             unlink_media(item.media)
             self._cache.pop(key)
         return count
-
-    def purge_older_than(self, minutes: int) -> int:
-        cutoff = time.time() - minutes * 60
-        stale = [key for key, item in self._cache.items() if item.cached_at < cutoff]
-        for key in stale:
-            item = self._cache.pop(key)
-            if item is not None:
-                unlink_media(item.media)
-        return len(stale)
 
     def cached_count(self, connection_id: str | None = None) -> int:
         if connection_id is None:
@@ -272,29 +295,45 @@ class Storage:
         self._afk_last_reply[key] = now
         return True
 
-    # ----------------------------------------------------------------- notes
-    def note_add(self, owner_id: int, name: str, text: str) -> None:
-        self._db.note_set(owner_id, name, text)
+    # ---------------------------------------------------------- say presets
+    def preset_add(self, owner_id: int, name: str, items: list[dict]) -> None:
+        self._db.preset_set(owner_id, name, items)
 
-    def note_get(self, owner_id: int, name: str) -> str | None:
-        return self._db.note_get(owner_id, name)
+    def preset_get(self, owner_id: int, name: str) -> list[dict] | None:
+        return self._db.preset_get(owner_id, name)
 
-    def note_delete(self, owner_id: int, name: str) -> bool:
-        return self._db.note_delete(owner_id, name)
+    def preset_delete(self, owner_id: int, name: str) -> bool:
+        return self._db.preset_delete(owner_id, name)
 
-    def note_list(self, owner_id: int) -> list[str]:
-        return self._db.note_list(owner_id)
+    def preset_list(self, owner_id: int) -> list[str]:
+        return self._db.preset_list(owner_id)
 
-    # ------------------------------------------------------------- reminders
-    def reminder_add(self, owner_id: int, connection_id: str, chat_id: int, minutes: float, text: str) -> int:
-        fire_at = time.time() + minutes * 60
-        return self._db.reminder_add(owner_id, connection_id, chat_id, fire_at, text)
+    # ------------------------------------------------------ notifications queue
+    def queue_add(
+        self,
+        owner_id: int,
+        kind: str,
+        payload: str,
+        *,
+        media: MediaRef | None = None,
+    ) -> None:
+        self._db.queue_add(
+            owner_id,
+            kind,
+            payload,
+            media_kind=media.kind if media else None,
+            media_file_id=media.file_id if media else None,
+            media_path=str(media.local_path) if media and media.local_path else None,
+        )
 
-    def reminder_delete(self, reminder_id: int) -> None:
-        self._db.reminder_delete(reminder_id)
+    def queue_count(self, owner_id: int) -> int:
+        return self._db.queue_count(owner_id)
 
-    def reminders_pending(self):
-        return self._db.reminders_pending()
+    def queue_list(self, owner_id: int):
+        return self._db.queue_list(owner_id)
+
+    def queue_clear(self, owner_id: int) -> None:
+        self._db.queue_clear(owner_id)
 
 
 def _lookup_keys(connection_id: str, chat_id: int, message_id: int) -> list[tuple[str, int, int]]:

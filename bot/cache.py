@@ -44,5 +44,10 @@ class LRUCache(Generic[K, V]):
     def items(self):
         return self._data.items()
 
+    def set_max_size(self, max_size: int) -> None:
+        self.max_size = max(1, max_size)
+        while len(self._data) > self.max_size:
+            self._data.popitem(last=False)
+
     def clear(self) -> None:
         self._data.clear()
