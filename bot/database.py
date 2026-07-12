@@ -69,6 +69,7 @@ class Database:
                 edited_at     REAL,
                 deleted_at    REAL,
                 bot_caused    INTEGER NOT NULL DEFAULT 0,
+                read_at       REAL,
                 PRIMARY KEY (connection_id, chat_id, message_id)
             );
 
@@ -100,6 +101,40 @@ class Database:
                 created_at    REAL NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS ghost_operators (
+                operator_user_id INTEGER PRIMARY KEY,
+                owner_id         INTEGER NOT NULL,
+                operator_chat_id INTEGER NOT NULL,
+                linked_at        REAL NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS ghost_link_codes (
+                owner_id   INTEGER PRIMARY KEY,
+                code       TEXT NOT NULL,
+                expires_at REAL NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS ghost_pins (
+                owner_id      INTEGER NOT NULL,
+                connection_id TEXT NOT NULL,
+                chat_id       INTEGER NOT NULL,
+                pinned_at     REAL NOT NULL,
+                PRIMARY KEY (owner_id, connection_id, chat_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS watched_profiles (
+                connection_id   TEXT NOT NULL,
+                chat_id         INTEGER NOT NULL,
+                owner_id        INTEGER NOT NULL,
+                chat_title      TEXT NOT NULL DEFAULT '',
+                first_name      TEXT,
+                last_name       TEXT,
+                username        TEXT,
+                photo_unique_id TEXT,
+                updated_at      REAL NOT NULL,
+                PRIMARY KEY (connection_id, chat_id)
+            );
+
             CREATE TABLE IF NOT EXISTS global_settings (
                 id   INTEGER PRIMARY KEY CHECK (id = 1),
                 data TEXT NOT NULL DEFAULT '{}'
@@ -124,6 +159,10 @@ class Database:
         if "bot_caused" not in columns:
             logger.info("Миграция БД: добавляю колонку messages.bot_caused")
             self._conn.execute("ALTER TABLE messages ADD COLUMN bot_caused INTEGER NOT NULL DEFAULT 0")
+            self._conn.commit()
+        if "read_at" not in columns:
+            logger.info("Миграция БД: добавляю колонку messages.read_at")
+            self._conn.execute("ALTER TABLE messages ADD COLUMN read_at REAL")
             self._conn.commit()
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_owner ON messages(owner_id)")
         self._conn.commit()
@@ -184,6 +223,12 @@ class Database:
             "SELECT owner_id FROM connections WHERE connection_id=?", (connection_id,)
         ).fetchone()
         return int(row["owner_id"]) if row else None
+
+    def user_chat_id_for_connection(self, connection_id: str) -> int | None:
+        row = self._conn.execute(
+            "SELECT user_chat_id FROM connections WHERE connection_id=?", (connection_id,)
+        ).fetchone()
+        return int(row["user_chat_id"]) if row else None
 
     def all_connections(self) -> list[sqlite3.Row]:
         return self._conn.execute("SELECT * FROM connections").fetchall()
@@ -459,6 +504,206 @@ class Database:
             (data_json,),
         )
         self._conn.commit()
+
+    # ------------------------------------------------------------ profile watch
+    def watch_upsert(
+        self,
+        connection_id: str,
+        chat_id: int,
+        owner_id: int,
+        chat_title: str,
+        first_name: str | None,
+        last_name: str | None,
+        username: str | None,
+        photo_unique_id: str | None,
+    ) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO watched_profiles
+                (connection_id, chat_id, owner_id, chat_title, first_name, last_name, username, photo_unique_id, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(connection_id, chat_id) DO UPDATE SET
+                owner_id=excluded.owner_id,
+                chat_title=excluded.chat_title,
+                first_name=excluded.first_name,
+                last_name=excluded.last_name,
+                username=excluded.username,
+                photo_unique_id=excluded.photo_unique_id,
+                updated_at=excluded.updated_at
+            """,
+            (connection_id, chat_id, owner_id, chat_title, first_name, last_name, username, photo_unique_id, time.time()),
+        )
+        self._conn.commit()
+
+    def watch_get(self, connection_id: str, chat_id: int) -> sqlite3.Row | None:
+        return self._conn.execute(
+            "SELECT * FROM watched_profiles WHERE connection_id=? AND chat_id=?", (connection_id, chat_id)
+        ).fetchone()
+
+    def watch_remove(self, connection_id: str, chat_id: int) -> bool:
+        cur = self._conn.execute(
+            "DELETE FROM watched_profiles WHERE connection_id=? AND chat_id=?", (connection_id, chat_id)
+        )
+        self._conn.commit()
+        return cur.rowcount > 0
+
+    def watch_all(self) -> list[sqlite3.Row]:
+        return self._conn.execute("SELECT * FROM watched_profiles").fetchall()
+
+    def watch_count_for_owner(self, owner_id: int) -> int:
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM watched_profiles WHERE owner_id=?", (owner_id,)
+        ).fetchone()
+        return int(row[0]) if row else 0
+
+    # ------------------------------------------------------------------ export
+    def messages_for_chat(self, connection_id: str, chat_id: int) -> list[sqlite3.Row]:
+        return self._conn.execute(
+            "SELECT * FROM messages WHERE connection_id=? AND chat_id=? ORDER BY cached_at",
+            (connection_id, chat_id),
+        ).fetchall()
+
+    # ------------------------------------------------------------- ghost mode
+    def unread_messages(self, connection_id: str, chat_id: int, owner_id: int) -> list[sqlite3.Row]:
+        return self._conn.execute(
+            """
+            SELECT * FROM messages
+            WHERE connection_id=? AND chat_id=? AND owner_id=?
+              AND (from_user_id IS NULL OR from_user_id != ?)
+              AND read_at IS NULL AND deleted_at IS NULL
+            ORDER BY cached_at
+            """,
+            (connection_id, chat_id, owner_id, owner_id),
+        ).fetchall()
+
+    def mark_read(self, connection_id: str, chat_id: int, message_ids: list[int]) -> None:
+        if not message_ids:
+            return
+        now = time.time()
+        placeholders = ",".join("?" for _ in message_ids)
+        self._conn.execute(
+            f"UPDATE messages SET read_at=? WHERE connection_id=? AND chat_id=? AND message_id IN ({placeholders})",
+            (now, connection_id, chat_id, *message_ids),
+        )
+        self._conn.commit()
+
+    def chats_with_unread(self, connection_id: str, owner_id: int) -> list[tuple[int, str, int, int]]:
+        rows = self._conn.execute(
+            """
+            SELECT chat_id, chat_title,
+                   COUNT(*) AS total,
+                   SUM(CASE WHEN (from_user_id IS NULL OR from_user_id != ?)
+                            AND read_at IS NULL AND deleted_at IS NULL THEN 1 ELSE 0 END) AS unread
+            FROM messages
+            WHERE connection_id=?
+            GROUP BY chat_id
+            ORDER BY MAX(cached_at) DESC
+            """,
+            (owner_id, connection_id),
+        ).fetchall()
+        return [
+            (int(r["chat_id"]), r["chat_title"] or str(r["chat_id"]), int(r["total"]), int(r["unread"] or 0))
+            for r in rows
+        ]
+
+    # ---------------------------------------------------------------- pins
+    def pin_add(self, owner_id: int, connection_id: str, chat_id: int) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO ghost_pins (owner_id, connection_id, chat_id, pinned_at) VALUES (?, ?, ?, ?)
+            ON CONFLICT(owner_id, connection_id, chat_id) DO NOTHING
+            """,
+            (owner_id, connection_id, chat_id, time.time()),
+        )
+        self._conn.commit()
+
+    def pin_remove(self, owner_id: int, connection_id: str, chat_id: int) -> None:
+        self._conn.execute(
+            "DELETE FROM ghost_pins WHERE owner_id=? AND connection_id=? AND chat_id=?",
+            (owner_id, connection_id, chat_id),
+        )
+        self._conn.commit()
+
+    def is_pinned(self, owner_id: int, connection_id: str, chat_id: int) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM ghost_pins WHERE owner_id=? AND connection_id=? AND chat_id=?",
+            (owner_id, connection_id, chat_id),
+        ).fetchone()
+        return row is not None
+
+    def pinned_chat_ids(self, owner_id: int, connection_id: str) -> set[int]:
+        rows = self._conn.execute(
+            "SELECT chat_id FROM ghost_pins WHERE owner_id=? AND connection_id=?", (owner_id, connection_id)
+        ).fetchall()
+        return {int(r["chat_id"]) for r in rows}
+
+    # ----------------------------------------------------- ghost operators
+    def ghost_code_set(self, owner_id: int, code: str, expires_at: float) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO ghost_link_codes (owner_id, code, expires_at) VALUES (?, ?, ?)
+            ON CONFLICT(owner_id) DO UPDATE SET code=excluded.code, expires_at=excluded.expires_at
+            """,
+            (owner_id, code, expires_at),
+        )
+        self._conn.commit()
+
+    def ghost_code_find_owner(self, code: str) -> int | None:
+        row = self._conn.execute(
+            "SELECT owner_id FROM ghost_link_codes WHERE code=? AND expires_at > ?", (code, time.time())
+        ).fetchone()
+        return int(row["owner_id"]) if row else None
+
+    def ghost_code_clear(self, owner_id: int) -> None:
+        self._conn.execute("DELETE FROM ghost_link_codes WHERE owner_id=?", (owner_id,))
+        self._conn.commit()
+
+    def ghost_link_add(self, owner_id: int, operator_user_id: int, operator_chat_id: int) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO ghost_operators (operator_user_id, owner_id, operator_chat_id, linked_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(operator_user_id) DO UPDATE SET
+                owner_id=excluded.owner_id, operator_chat_id=excluded.operator_chat_id, linked_at=excluded.linked_at
+            """,
+            (operator_user_id, owner_id, operator_chat_id, time.time()),
+        )
+        self._conn.commit()
+
+    def ghost_link_remove(self, operator_user_id: int) -> None:
+        self._conn.execute("DELETE FROM ghost_operators WHERE operator_user_id=?", (operator_user_id,))
+        self._conn.commit()
+
+    def ghost_operator_owner(self, operator_user_id: int) -> sqlite3.Row | None:
+        return self._conn.execute(
+            "SELECT * FROM ghost_operators WHERE operator_user_id=?", (operator_user_id,)
+        ).fetchone()
+
+    def ghost_operators_for_owner(self, owner_id: int) -> list[sqlite3.Row]:
+        return self._conn.execute(
+            "SELECT * FROM ghost_operators WHERE owner_id=? ORDER BY linked_at", (owner_id,)
+        ).fetchall()
+
+    def recent_messages(self, connection_id: str, chat_id: int, limit: int) -> list[sqlite3.Row]:
+        rows = self._conn.execute(
+            "SELECT * FROM messages WHERE connection_id=? AND chat_id=? ORDER BY cached_at DESC LIMIT ?",
+            (connection_id, chat_id, limit),
+        ).fetchall()
+        return list(reversed(rows))
+
+    def chats_for_connection(self, connection_id: str) -> list[tuple[int, str, int]]:
+        """Список чатов с числом сохранённых сообщений (для меню экспорта)."""
+        rows = self._conn.execute(
+            """
+            SELECT chat_id, chat_title, COUNT(*) as cnt
+            FROM messages
+            WHERE connection_id=?
+            GROUP BY chat_id
+            ORDER BY MAX(cached_at) DESC
+            """,
+            (connection_id,),
+        ).fetchall()
+        return [(int(r["chat_id"]), r["chat_title"] or str(r["chat_id"]), int(r["cnt"])) for r in rows]
 
     # -------------------------------------------------------------- backup/ops
     def snapshot(self, dest_path: Path) -> Path:

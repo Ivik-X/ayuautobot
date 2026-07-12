@@ -5,12 +5,20 @@ services:
     env_file: .env
     volumes:
       - ./data:/app/data
+    # Раскомментируйте, если используете режим webhook (WEBHOOK_URL в .env) —
+    # порт должен совпадать с WEBAPP_PORT. Для обычного polling не нужен.
+    # ports:
+    #   - "8080:8080"
     restart: unless-stopped
     deploy:
       resources:
         limits:
+          # Если STT_ENABLED=true (локальное распознавание речи), модель +
+          # ctranslate2/onnxruntime требуют существенно больше памяти — этот
+          # лимит рассчитан на такой случай. Если STT выключен и сервер
+          # совсем слабый (1 GB RAM), можно смело понизить до 400M.
           cpus: "1.0"
-          memory: 400M
+          memory: 900M
         reservations:
           memory: 128M
     logging:

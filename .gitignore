@@ -2,6 +2,8 @@ data/media/*
 !data/media/.gitkeep
 data/db_media/*
 !data/db_media/.gitkeep
+data/stt_models/*
+!data/stt_models/.gitkeep
 data/*.db
 data/*.db-wal
 data/*.db-shm

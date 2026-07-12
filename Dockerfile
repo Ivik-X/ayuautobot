@@ -22,8 +22,9 @@ RUN chmod +x /usr/local/bin/entrypoint.sh
 COPY data/media/.gitkeep data/media/.gitkeep
 COPY data/db_media/.gitkeep data/db_media/.gitkeep
 COPY data/tmp/.gitkeep data/tmp/.gitkeep
+COPY data/stt_models/.gitkeep data/stt_models/.gitkeep
 
-RUN mkdir -p data/media data/db_media data/tmp && chown -R appuser:appuser /app
+RUN mkdir -p data/media data/db_media data/tmp data/stt_models && chown -R appuser:appuser /app
 
 # entrypoint выполняется как root: чинит права на смонтированный volume
 # ./data, затем сам понижает привилегии до appuser перед запуском бота.

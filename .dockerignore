@@ -13,6 +13,8 @@ data/media/*
 !data/media/.gitkeep
 data/db_media/*
 !data/db_media/.gitkeep
+data/stt_models/*
+!data/stt_models/.gitkeep
 .DS_Store
 *.md
 Dockerfile

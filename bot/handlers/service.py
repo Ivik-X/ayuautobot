@@ -1,23 +1,36 @@
 from __future__ import annotations
 
+import html
+import json
 import logging
+import tempfile
+import time
 from pathlib import Path
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, FSInputFile, Message
 
 from bot.backup import BackupManager
-from bot.media import MEDIA_DIR, MediaRef, directory_size_bytes, extract_media, send_media_copy
+from bot.media import MEDIA_DIR, MediaRef, directory_size_bytes, download_bytes, extract_media, send_media_copy
+from bot import ghost
+from bot.config import SttConfig
+from bot.handlers import ghost as ghost_handlers
+from bot.features.chat_export import build_export_html, build_export_json
+from bot.features.stt_local import SttError, transcribe_local
 from bot.keyboards import (
     admin_back_keyboard,
     admin_main_keyboard,
     admin_section_keyboard,
+    chats_export_keyboard,
+    chats_recent_keyboard,
+    ghost_settings_keyboard,
     help_back_keyboard,
     help_topics_keyboard,
     main_settings_keyboard,
     preset_creation_keyboard,
     presets_keyboard,
+    recent_count_keyboard,
     section_keyboard,
 )
 from bot.settings import get_admin_field, get_owner_field, next_cycle_value, parse_value
@@ -129,6 +142,11 @@ async def us_open(call: CallbackQuery, storage: Storage) -> None:
         await call.answer()
         return
 
+    if section == "ghost":
+        await call.message.edit_text(_ghost_settings_text(storage, owner_id), reply_markup=_ghost_settings_kb(storage, owner_id))
+        await call.answer()
+        return
+
     settings = storage.get_settings(owner_id)
     title = SECTION_TITLES.get(section, section)
     await call.message.edit_text(f"<b>{title}</b>", reply_markup=section_keyboard(section, settings))
@@ -202,6 +220,229 @@ async def us_digest(call: CallbackQuery, storage: Storage) -> None:
     await call.message.edit_text(
         "<b>⚙️ Ваши настройки</b>\nВыберите раздел:", reply_markup=main_settings_keyboard(digest_count)
     )
+
+
+@router.callback_query(F.data == "us:export")
+async def us_export(call: CallbackQuery, storage: Storage) -> None:
+    owner_id = call.from_user.id
+    connection_ids = storage.connections_for_owner(owner_id)
+    chats: list[tuple[int, str, int]] = []
+    for connection_id in connection_ids:
+        chats.extend(storage.chats_for_connection(connection_id))
+    chats.sort(key=lambda item: item[2], reverse=True)
+
+    if not chats:
+        await call.answer(
+            "Пока нет сохранённых сообщений для экспорта. Включите «сохранять все сообщения» "
+            "в /admin → 💾 Данные, если хотите копить историю для экспорта.",
+            show_alert=True,
+        )
+        return
+
+    await call.message.edit_text(
+        "<b>📤 Экспорт переписки</b>\nВыберите чат (в скобках — число сохранённых сообщений):",
+        reply_markup=chats_export_keyboard(chats),
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("us:export:chat:"))
+async def us_export_chat(call: CallbackQuery, storage: Storage) -> None:
+    owner_id = call.from_user.id
+    chat_id = int(call.data.split(":", 3)[3])
+    connection_ids = storage.connections_for_owner(owner_id)
+
+    rows = []
+    chat_title = str(chat_id)
+    used_connection_id = None
+    for connection_id in connection_ids:
+        candidate = storage.messages_for_chat(connection_id, chat_id)
+        if candidate:
+            rows = candidate
+            used_connection_id = connection_id
+            for cid, title, _count in storage.chats_for_connection(connection_id):
+                if cid == chat_id:
+                    chat_title = title
+            break
+
+    if not rows or used_connection_id is None:
+        await call.answer("Нет сохранённых сообщений для этого чата.", show_alert=True)
+        return
+
+    await call.answer("Готовлю файлы…")
+
+    safe_name = _safe_filename(chat_title)
+    export_json = build_export_json(chat_title, chat_id, rows)
+    export_html = build_export_html(chat_title, owner_id, rows)
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        json_path = Path(tmp_dir) / "export.json"
+        html_path = Path(tmp_dir) / "export.html"
+        json_path.write_text(json.dumps(export_json, ensure_ascii=False, indent=2), encoding="utf-8")
+        html_path.write_text(export_html, encoding="utf-8")
+
+        await call.message.answer_document(
+            FSInputFile(json_path, filename=f"{safe_name}.json"),
+            caption=f"📤 Экспорт «{chat_title}» — JSON ({len(rows)} сообщ.)",
+        )
+        await call.message.answer_document(
+            FSInputFile(html_path, filename=f"{safe_name}.html"),
+            caption=(
+                "HTML-версия — откройте в браузере. Если нужен PDF, откройте файл в браузере "
+                "и нажмите «Печать → Сохранить как PDF» (Ctrl+P)."
+            ),
+        )
+
+
+def _safe_filename(name: str) -> str:
+    cleaned = "".join(c if c.isalnum() or c in " _-" else "_" for c in name).strip()
+    return cleaned[:60] or "chat"
+
+
+@router.callback_query(F.data == "us:recent")
+async def us_recent(call: CallbackQuery, storage: Storage) -> None:
+    owner_id = call.from_user.id
+    connection_ids = storage.connections_for_owner(owner_id)
+    chats: list[tuple[int, str, int]] = []
+    for connection_id in connection_ids:
+        chats.extend(storage.chats_for_connection(connection_id))
+    chats.sort(key=lambda item: item[2], reverse=True)
+
+    if not chats:
+        await call.answer(
+            "Пока нет сохранённых сообщений. Включите «сохранять все сообщения» в /admin → 💾 Данные.",
+            show_alert=True,
+        )
+        return
+
+    await call.message.edit_text(
+        "<b>👁‍🗨 Последние сообщения</b>\nВыберите чат:", reply_markup=chats_recent_keyboard(chats)
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("us:recent:chat:"))
+async def us_recent_chat(call: CallbackQuery) -> None:
+    chat_id = int(call.data.split(":", 3)[3])
+    await call.message.edit_text(
+        "Сколько последних сообщений показать?", reply_markup=recent_count_keyboard(chat_id)
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("us:recent:show:"))
+async def us_recent_show(call: CallbackQuery, storage: Storage) -> None:
+    _, _, _, chat_id_raw, n_raw = call.data.split(":", 4)
+    chat_id = int(chat_id_raw)
+    limit = int(n_raw)
+    owner_id = call.from_user.id
+    connection_ids = storage.connections_for_owner(owner_id)
+
+    rows = []
+    chat_title = str(chat_id)
+    for connection_id in connection_ids:
+        candidate = storage.recent_messages(connection_id, chat_id, limit)
+        if candidate:
+            rows = candidate
+            for cid, title, _count in storage.chats_for_connection(connection_id):
+                if cid == chat_id:
+                    chat_title = title
+            break
+
+    if not rows:
+        await call.answer("Нет сохранённых сообщений.", show_alert=True)
+        return
+
+    await call.answer()
+    for chunk in _format_recent_messages(chat_title, rows):
+        await call.message.answer(chunk)
+
+
+def _format_recent_messages(chat_title: str, rows) -> list[str]:
+    header = f"<b>👁‍🗨 {chat_title} — последние {len(rows)} сообщ.</b>\n\n"
+    lines = []
+    for row in rows:
+        ts = time.strftime("%d.%m %H:%M", time.localtime(row["cached_at"]))
+        sender = html.escape(row["from_user_name"] or "?")
+        content = html.escape(row["content"] or "")
+        suffix = " 🗑" if row["deleted_at"] else (" ✏️" if row["edited_at"] else "")
+        lines.append(f"<b>{sender}</b> <i>{ts}</i>{suffix}\n{content}")
+
+    chunks: list[str] = []
+    current = header
+    for line in lines:
+        candidate = current + line + "\n\n"
+        if len(candidate) > 3500:
+            chunks.append(current)
+            current = line + "\n\n"
+        else:
+            current = candidate
+    if current.strip():
+        chunks.append(current)
+    return chunks
+
+
+def _ghost_settings_text(storage: Storage, owner_id: int) -> str:
+    settings = storage.get_settings(owner_id)
+    if not settings.ghost_mode_enabled:
+        return (
+            "<b>👻 Режим призрака</b>\n\n"
+            "Позволяет читать и писать в чаты собеседников через бота — со своего "
+            "аккаунта или с привязанного второго, без захода в само приложение "
+            "Telegram. Сейчас выключен."
+        )
+    operators = storage.ghost_operators_for_owner(owner_id)
+    lines = [
+        "<b>👻 Режим призрака</b>\n",
+        "Откройте /ghost в этом чате (или с привязанного аккаунта), чтобы выбрать чат.",
+    ]
+    if operators:
+        lines.append(f"\nПривязанных аккаунтов: <b>{len(operators)}</b>")
+    return "\n".join(lines)
+
+
+def _ghost_settings_kb(storage: Storage, owner_id: int):
+    settings = storage.get_settings(owner_id)
+    operators = storage.ghost_operators_for_owner(owner_id)
+    return ghost_settings_keyboard(settings.ghost_mode_enabled, operators)
+
+
+@router.callback_query(F.data == "gs:toggle")
+async def gs_toggle(call: CallbackQuery, storage: Storage) -> None:
+    owner_id = call.from_user.id
+    storage.toggle_setting(owner_id, "ghost_mode_enabled")
+    await call.message.edit_text(_ghost_settings_text(storage, owner_id), reply_markup=_ghost_settings_kb(storage, owner_id))
+    await call.answer("Сохранено")
+
+
+@router.callback_query(F.data == "gs:gencode")
+async def gs_gencode(call: CallbackQuery, storage: Storage) -> None:
+    owner_id = call.from_user.id
+    code = ghost.generate_link_code(storage, owner_id)
+    minutes = ghost.CODE_TTL_SECONDS // 60
+    await call.answer()
+    await call.message.answer(
+        f"🔑 Код привязки: <code>{code}</code>\n\n"
+        f"Действует {minutes} минут, одноразовый. Со <b>второго аккаунта</b> откройте чат с этим "
+        f"ботом, нажмите /start, затем отправьте:\n<code>/link {code}</code>",
+    )
+
+
+@router.callback_query(F.data.startswith("gs:unlink:"))
+async def gs_unlink(call: CallbackQuery, storage: Storage) -> None:
+    owner_id = call.from_user.id
+    operator_id = int(call.data.split(":", 2)[2])
+    link = storage.ghost_operator_owner(operator_id)
+    if link is None or int(link["owner_id"]) != owner_id:
+        await call.answer("Не найдено", show_alert=True)
+        return
+    storage.ghost_link_remove(operator_id)
+    try:
+        await call.bot.send_message(int(link["operator_chat_id"]), "🔌 Доступ к режиму призрака отозван владельцем.")
+    except Exception:
+        logger.exception("Не удалось уведомить оператора об отвязке")
+    await call.message.edit_text(_ghost_settings_text(storage, owner_id), reply_markup=_ghost_settings_kb(storage, owner_id))
+    await call.answer("Отвязано")
 
 
 # ---------------------------------------------------------------- say presets
@@ -366,10 +607,19 @@ async def ad_cancel(call: CallbackQuery) -> None:
 
 # ------------------------------------------------------------- catch-all private input
 @router.message(F.chat.type == "private")
-async def private_input(message: Message, storage: Storage) -> None:
+async def private_input(message: Message, storage: Storage, stt_config: SttConfig) -> None:
     user_id = message.from_user.id
     state = _pending.get(user_id)
+
     if state is None:
+        if await ghost_handlers.handle_search_input(message, storage):
+            return
+        if await ghost_handlers.handle_session_relay(message, storage):
+            return
+        # Голосовые/кружки/аудио, отправленные боту напрямую (не часть другого
+        # диалога) — расшифровываем, если настроен STT.
+        if message.voice or message.video_note or message.audio:
+            await _handle_stt(message, stt_config)
         return
 
     kind = state["kind"]
@@ -465,6 +715,26 @@ async def private_input(message: Message, storage: Storage) -> None:
                 logger.exception("Не удалось отправить рассылку owner=%s", row["owner_id"])
         await message.answer(f"Отправлено {sent} из {len(rows)}.")
         return
+
+
+async def _handle_stt(message: Message, stt_config: SttConfig) -> None:
+    if not stt_config.enabled:
+        return  # STT выключен (STT_ENABLED=false в .env) — молчим, чтобы не спамить объяснением на каждое гс
+    media = extract_media(message)
+    if media is None:
+        return
+    data = await download_bytes(message.bot, media.file_id)
+    if data is None:
+        await message.answer("❌ Не удалось скачать файл для распознавания.")
+        return
+    status = await message.answer("🎙 Распознаю локально (первый запуск может занять время — грузится модель)…")
+    try:
+        text = await transcribe_local(
+            data, model_size=stt_config.model_size, models_dir=stt_config.models_dir, language=stt_config.language
+        )
+        await status.edit_text(f"📝 <b>Расшифровка:</b>\n{text}")
+    except SttError as exc:
+        await status.edit_text(f"❌ Не удалось распознать: {exc}")
 
 
 def _message_to_preset_item(message: Message) -> dict | None:

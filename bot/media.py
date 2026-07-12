@@ -106,17 +106,25 @@ async def download_media(bot: Bot, media: MediaRef, message_id: int, connection_
     for attempt in range(2):
         try:
             tg_file = await bot.get_file(media.file_id)
-            if tg_file.file_path:
-                await bot.download_file(tg_file.file_path, destination=destination)
-                media.local_path = destination
+            if not tg_file.file_path:
+                # Telegram ответил без ошибки, но без file_path — типично для
+                # одноразовых/самоуничтожающихся медиа, которые сервер не отдаёт
+                # ботам. Раньше это молча считалось "успехом" без скачивания —
+                # теперь считаем это ошибкой, логируем и пробуем ещё раз.
+                raise RuntimeError(f"get_file вернул пустой file_path для {media.kind} (message_id={message_id})")
+            await bot.download_file(tg_file.file_path, destination=destination)
+            media.local_path = destination
             return media
-        except Exception:
+        except Exception as exc:
             if attempt == 0:
-                # Одноразовые/защищённые медиа иногда не отдаются с первой попытки —
-                # пробуем ещё раз почти сразу, пока файл не "протух" на серверах Telegram.
+                # Иногда файл отдаётся не с первой попытки — пробуем ещё раз почти
+                # сразу, пока он не "протух" на серверах Telegram.
                 await asyncio.sleep(0.3)
                 continue
-            logger.exception("Не удалось скачать медиа %s (защищённый/одноразовый контент?)", media.kind)
+            logger.warning(
+                "Не удалось скачать медиа %s (message_id=%s, connection=%s): %s: %s",
+                media.kind, message_id, connection_id, type(exc).__name__, exc,
+            )
 
     return media
 

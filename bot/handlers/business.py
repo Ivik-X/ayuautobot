@@ -3,14 +3,18 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+import uuid
 
 import aiohttp
-from aiogram import Bot, Router
+from aiogram import Bot, F, Router
 from aiogram.enums import ChatAction
 from aiogram.types import (
     BufferedInputFile,
     BusinessConnection,
     BusinessMessagesDeleted,
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
     InputMediaPhoto,
     Message,
 )
@@ -26,7 +30,9 @@ from bot.commands import (
     TranslateCommand,
     TypingCommand,
     UnmuteCommand,
+    UnwatchCommand,
     ViewCommand,
+    WatchCommand,
     parse_command,
 )
 from bot.features.antisearch import antisearch_transform
@@ -35,6 +41,7 @@ from bot.features.qr import QrError, make_qr_png
 from bot.features.shorten import ShortenError, shorten
 from bot.features.translate import TranslateError, translate
 from bot.fun import mock_text, reverse_text
+from bot.handlers import ghost as ghost_handlers
 from bot.media import (
     MediaRef,
     download_bytes,
@@ -85,6 +92,7 @@ async def on_business_message(
         await _apply_mute(message, bot, storage, connection_id)
         await _maybe_afk_reply(message, bot, storage, connection_id)
         await _maybe_antispoiler(message, bot, storage, connection_id)
+        await ghost_handlers.relay_live_message(bot, storage, connection_id, message.chat.id, message)
 
 
 @router.edited_business_message()
@@ -196,13 +204,32 @@ async def _ensure_connection(bot: Bot, storage: Storage, connection_id: str) -> 
         return None
 
 
+_MEDIA_LABELS = {
+    "photo": "фото",
+    "voice": "голосовое",
+    "video_note": "кружок",
+    "video": "видео",
+}
+
+
 async def _cache_message(message: Message, bot: Bot, storage: Storage, connection_id: str, *, bot_caused: bool = False) -> None:
     settings = storage.get_settings_for_connection(connection_id)
     media = extract_media(message)
     if media is not None:
-        protected = bool(message.has_protected_content)
-        if not protected or settings.save_protected_media:
-            media = await download_media(bot, media, message.message_id, connection_id)
+        # content-protection (has_protected_content) — это отдельный флаг чата
+        # ("запрет пересылки"), он НЕ блокирует скачивание ботом и не имеет
+        # отношения к самоуничтожающимся ("одноразовым") медиа — поэтому
+        # всегда пробуем скачать, а не гадаем по этому флагу.
+        media = await download_media(bot, media, message.message_id, connection_id)
+        if media.local_path is None and settings.save_protected_media and media.kind in _MEDIA_LABELS:
+            label = _MEDIA_LABELS[media.kind]
+            await _notify_owner(
+                bot, storage, connection_id,
+                f"🔒 Собеседник отправил {label}, но боту не удалось скачать файл (после повторной попытки). "
+                "Если это было одноразовое/самоуничтожающееся медиа — скорее всего, это ограничение "
+                "платформы Telegram для ботов, и обойти его через официальный Bot API нельзя. "
+                "Если это была обычная отправка — возможно, разовый сетевой сбой.",
+            )
     storage.cache_message(connection_id, message, media=media, bot_caused=bot_caused)
 
 
@@ -234,6 +261,12 @@ async def _maybe_afk_reply(message: Message, bot: Bot, storage: Storage, connect
 
 
 async def _maybe_antispoiler(message: Message, bot: Bot, storage: Storage, connection_id: str) -> None:
+    """Пересылает владельцу копию медиа со спойлером (has_media_spoiler) без спойлера.
+
+    Важно: это НЕ то же самое, что "одноразовые"/самоуничтожающиеся медиа —
+    спойлер (🙈 «нажмите, чтобы посмотреть») это отдельный, обычный флаг
+    сообщения, и такие фото/видео скачиваются ботом без ограничений.
+    """
     settings = storage.get_settings_for_connection(connection_id)
     if not settings.anti_spoiler or not message.has_media_spoiler:
         return
@@ -245,6 +278,13 @@ async def _maybe_antispoiler(message: Message, bot: Bot, storage: Storage, conne
         return
     if media.local_path is None:
         media = await download_media(bot, media, message.message_id, connection_id)
+    if media.local_path is None:
+        await _notify_owner(
+            bot, storage, connection_id,
+            "⚠️ Анти-спойлер: собеседник отправил медиа со спойлером, но боту не удалось "
+            "его скачать (см. логи контейнера — там будет точная причина ошибки).",
+        )
+        return
     await send_media_copy(bot, owner_chat_id, media, caption="🙈 Спойлер снят (анти-спойлер)")
 
 
@@ -311,6 +351,8 @@ _COMMAND_NAMES = {
     ShortCommand: "short",
     SayCommand: "say",
     ViewCommand: "view",
+    WatchCommand: "watch",
+    UnwatchCommand: "unwatch",
 }
 
 
@@ -367,7 +409,10 @@ async def _dispatch(
     settings, owner_id: int | None, http_session: aiohttp.ClientSession,
 ) -> None:
     if isinstance(command, SpamCommand):
-        await _run_spam(command, message, bot, storage, connection_id, chat_id)
+        if command.count > SPAM_CONFIRM_THRESHOLD:
+            await _request_spam_confirmation(command, message, bot, storage, connection_id, chat_id, owner_id)
+        else:
+            await _run_spam(command, message, bot, storage, connection_id, chat_id)
         return
 
     if isinstance(command, MuteCommand):
@@ -422,6 +467,16 @@ async def _dispatch(
         await _handle_say(command, bot, storage, connection_id, chat_id, owner_id)
         return
 
+    if isinstance(command, WatchCommand):
+        await _handle_watch(message, bot, storage, connection_id, chat_id, owner_id)
+        return
+
+    if isinstance(command, UnwatchCommand):
+        removed = storage.watch_remove(connection_id, chat_id)
+        text = "👁 Слежение за профилем этого чата выключено." if removed else "Этот чат и так не отслеживался."
+        await _notify_owner(bot, storage, connection_id, text)
+        return
+
     if isinstance(command, SimpleCommand):
         if command.name == "ping":
             await _notify_owner(bot, storage, connection_id, "🏓 pong — бот на связи")
@@ -432,6 +487,80 @@ async def _dispatch(
                 f"🆔 Chat ID: <code>{chat_id}</code>\nConnection ID: <code>{connection_id}</code>",
             )
             return
+
+
+SPAM_CONFIRM_THRESHOLD = 150
+_SPAM_CONFIRM_TTL = 600  # секунд, на сколько живёт неподтверждённый запрос
+
+# token -> {"command", "message", "connection_id", "chat_id"}
+_pending_spam: dict[str, dict] = {}
+
+
+async def _request_spam_confirmation(
+    command: SpamCommand, message: Message, bot: Bot, storage: Storage, connection_id: str, chat_id: int, owner_id: int | None
+) -> None:
+    owner_chat_id = storage.owner_chat_id(connection_id)
+    if owner_chat_id is None:
+        return
+
+    token = uuid.uuid4().hex[:12]
+    _pending_spam[token] = {
+        "command": command,
+        "message": message,
+        "connection_id": connection_id,
+        "chat_id": chat_id,
+    }
+    asyncio.create_task(_expire_spam_token(token))
+
+    if command.text is not None:
+        preview = html.escape(command.text[:200])
+    elif message.reply_to_message is not None:
+        preview = "содержимое реплая (медиа/текст/стикер)"
+    else:
+        preview = "—"
+
+    text = (
+        f"⚠️ <b>Подтверждение .spam</b>\n"
+        f"Запрошена отправка <b>{command.count}</b> сообщений в чат «{html.escape(_chat_title(message))}».\n"
+        f"Содержимое: {preview}\n\n"
+        f"Команда уже удалена из чата — собеседник её не видел.\n"
+        f"Запрос действует {_SPAM_CONFIRM_TTL // 60} мин."
+    )
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"spam:yes:{token}"),
+                InlineKeyboardButton(text="❌ Отмена", callback_data=f"spam:no:{token}"),
+            ]
+        ]
+    )
+    await bot.send_message(chat_id=owner_chat_id, text=text, reply_markup=keyboard)
+
+
+async def _expire_spam_token(token: str) -> None:
+    await asyncio.sleep(_SPAM_CONFIRM_TTL)
+    _pending_spam.pop(token, None)
+
+
+@router.callback_query(F.data.startswith("spam:yes:"))
+async def cb_spam_confirm(call: CallbackQuery, bot: Bot, storage: Storage) -> None:
+    token = call.data.split(":", 2)[2]
+    entry = _pending_spam.pop(token, None)
+    if entry is None:
+        await call.answer("Запрос устарел или уже обработан", show_alert=True)
+        return
+    await call.answer("Отправляю…")
+    await call.message.edit_text(call.message.text + "\n\n✅ Подтверждено, отправляю…")
+    await _run_spam(entry["command"], entry["message"], bot, storage, entry["connection_id"], entry["chat_id"])
+
+
+@router.callback_query(F.data.startswith("spam:no:"))
+async def cb_spam_cancel(call: CallbackQuery) -> None:
+    token = call.data.split(":", 2)[2]
+    _pending_spam.pop(token, None)
+    await call.answer("Отменено")
+    if call.message:
+        await call.message.edit_text(call.message.text + "\n\n❌ Отменено.")
 
 
 async def _run_spam(command: SpamCommand, message: Message, bot: Bot, storage: Storage, connection_id: str, chat_id: int) -> None:
@@ -482,6 +611,30 @@ async def _run_typing(bot: Bot, connection_id: str, chat_id: int, seconds: int) 
     for _ in range(seconds):
         await bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING, business_connection_id=connection_id)
         await asyncio.sleep(1)
+
+
+async def _handle_watch(message: Message, bot: Bot, storage: Storage, connection_id: str, chat_id: int, owner_id: int | None) -> None:
+    if owner_id is None:
+        return
+    chat_title = _chat_title(message)
+    try:
+        chat = await bot.get_chat(chat_id)
+        photo_unique_id = chat.photo.small_file_unique_id if chat.photo else None
+        snapshot = {
+            "first_name": chat.first_name,
+            "last_name": chat.last_name,
+            "username": chat.username,
+            "photo_unique_id": photo_unique_id,
+        }
+    except Exception:
+        logger.exception("Не удалось получить снимок профиля для .watch")
+        snapshot = {"first_name": None, "last_name": None, "username": None, "photo_unique_id": None}
+
+    storage.watch_upsert(connection_id, chat_id, owner_id, chat_title, snapshot)
+    await _notify_owner(
+        bot, storage, connection_id,
+        "👁 Слежение за профилем этого чата включено — уведомлю при смене имени, username или фото.",
+    )
 
 
 async def _handle_say(command: SayCommand, bot: Bot, storage: Storage, connection_id: str, chat_id: int, owner_id: int | None) -> None:

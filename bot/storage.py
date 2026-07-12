@@ -23,6 +23,7 @@ class Storage:
         self._admin_ids = admin_ids
         self._connections: dict[str, BusinessConnection] = {}
         self._owner_of_connection: dict[str, int] = {}
+        self._owner_chat_cache: dict[str, int] = {}
         self._settings_cache: dict[int, OwnerSettings] = {}
         self._global_settings: GlobalSettings | None = None
         self._cache: LRUCache[tuple[str, int, int], CachedMessage] = LRUCache(
@@ -54,7 +55,15 @@ class Storage:
 
     def owner_chat_id(self, connection_id: str) -> int | None:
         connection = self._connections.get(connection_id)
-        return connection.user_chat_id if connection else None
+        if connection:
+            return connection.user_chat_id
+        cached = self._owner_chat_cache.get(connection_id)
+        if cached is not None:
+            return cached
+        chat_id = self._db.user_chat_id_for_connection(connection_id)
+        if chat_id is not None:
+            self._owner_chat_cache[connection_id] = chat_id
+        return chat_id
 
     def owner_user_id(self, connection_id: str) -> int | None:
         connection = self._connections.get(connection_id)
@@ -66,6 +75,9 @@ class Storage:
         if owner is not None:
             self._owner_of_connection[connection_id] = owner
         return owner
+
+    def connections_for_owner(self, owner_id: int) -> list[str]:
+        return [row["connection_id"] for row in self._db.all_connections() if int(row["owner_id"]) == owner_id]
 
     def is_bot_message(self, message: Message) -> bool:
         return message.sender_business_bot is not None
@@ -177,11 +189,17 @@ class Storage:
             unlink_media(old.media)
         self._cache.set(key, cached)
 
-        if self.get_global().store_all_messages:
+        if self.get_global().store_all_messages or self._ghost_needs_history(connection_id):
             owner_id = self.owner_user_id(connection_id)
             self._db.upsert_message(cached, title, owner_id, bot_caused=bot_caused)
 
         return cached
+
+    def _ghost_needs_history(self, connection_id: str) -> bool:
+        owner_id = self.owner_user_id(connection_id)
+        if owner_id is None:
+            return False
+        return self.get_settings(owner_id).ghost_mode_enabled
 
     def find_cached(self, connection_id: str, chat_id: int, message_id: int) -> CachedMessage | None:
         for key in _lookup_keys(connection_id, chat_id, message_id):
@@ -307,6 +325,76 @@ class Storage:
 
     def preset_list(self, owner_id: int) -> list[str]:
         return self._db.preset_list(owner_id)
+
+    # --------------------------------------------------------- profile watch
+    def watch_upsert(self, connection_id: str, chat_id: int, owner_id: int, chat_title: str, snapshot: dict) -> None:
+        self._db.watch_upsert(
+            connection_id, chat_id, owner_id, chat_title,
+            snapshot.get("first_name"), snapshot.get("last_name"),
+            snapshot.get("username"), snapshot.get("photo_unique_id"),
+        )
+
+    def watch_get(self, connection_id: str, chat_id: int):
+        return self._db.watch_get(connection_id, chat_id)
+
+    def watch_remove(self, connection_id: str, chat_id: int) -> bool:
+        return self._db.watch_remove(connection_id, chat_id)
+
+    def watch_all(self):
+        return self._db.watch_all()
+
+    # -------------------------------------------------------------- export
+    def messages_for_chat(self, connection_id: str, chat_id: int):
+        return self._db.messages_for_chat(connection_id, chat_id)
+
+    def recent_messages(self, connection_id: str, chat_id: int, limit: int):
+        return self._db.recent_messages(connection_id, chat_id, limit)
+
+    def chats_for_connection(self, connection_id: str):
+        return self._db.chats_for_connection(connection_id)
+
+    # ------------------------------------------------------------- ghost mode
+    def unread_messages(self, connection_id: str, chat_id: int, owner_id: int):
+        return self._db.unread_messages(connection_id, chat_id, owner_id)
+
+    def mark_read(self, connection_id: str, chat_id: int, message_ids: list[int]) -> None:
+        self._db.mark_read(connection_id, chat_id, message_ids)
+
+    def chats_with_unread(self, connection_id: str, owner_id: int):
+        return self._db.chats_with_unread(connection_id, owner_id)
+
+    def pin_add(self, owner_id: int, connection_id: str, chat_id: int) -> None:
+        self._db.pin_add(owner_id, connection_id, chat_id)
+
+    def pin_remove(self, owner_id: int, connection_id: str, chat_id: int) -> None:
+        self._db.pin_remove(owner_id, connection_id, chat_id)
+
+    def is_pinned(self, owner_id: int, connection_id: str, chat_id: int) -> bool:
+        return self._db.is_pinned(owner_id, connection_id, chat_id)
+
+    def pinned_chat_ids(self, owner_id: int, connection_id: str) -> set[int]:
+        return self._db.pinned_chat_ids(owner_id, connection_id)
+
+    def ghost_code_set(self, owner_id: int, code: str, expires_at: float) -> None:
+        self._db.ghost_code_set(owner_id, code, expires_at)
+
+    def ghost_code_find_owner(self, code: str) -> int | None:
+        return self._db.ghost_code_find_owner(code)
+
+    def ghost_code_clear(self, owner_id: int) -> None:
+        self._db.ghost_code_clear(owner_id)
+
+    def ghost_link_add(self, owner_id: int, operator_user_id: int, operator_chat_id: int) -> None:
+        self._db.ghost_link_add(owner_id, operator_user_id, operator_chat_id)
+
+    def ghost_link_remove(self, operator_user_id: int) -> None:
+        self._db.ghost_link_remove(operator_user_id)
+
+    def ghost_operator_owner(self, operator_user_id: int):
+        return self._db.ghost_operator_owner(operator_user_id)
+
+    def ghost_operators_for_owner(self, owner_id: int):
+        return self._db.ghost_operators_for_owner(owner_id)
 
     # ------------------------------------------------------ notifications queue
     def queue_add(

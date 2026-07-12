@@ -32,6 +32,7 @@ class OwnerSettings:
     anon_stickers: bool = False             # пересылать стикеры как картинку без ссылки на стикерпак
     anti_spoiler: bool = False              # спойлеры собеседника дублировать без спойлера в ЛС с ботом
     anti_search: bool = False               # подменять буквы на визуальные twin-символы (антипоиск)
+    ghost_mode_enabled: bool = False        # разрешить управление чатами через /ghost (себе и привязанным операторам)
 
     # Команды (включение/выключение целиком)
     cmd_spam: bool = True
@@ -46,6 +47,7 @@ class OwnerSettings:
     cmd_ping: bool = True
     cmd_say: bool = True
     cmd_view: bool = True
+    cmd_watch: bool = True
 
     # Прочее
     cache_ttl_hours: float = 24
@@ -83,6 +85,8 @@ COMMAND_FLAG = {
     "ping": "cmd_ping",
     "say": "cmd_say",
     "view": "cmd_view",
+    "watch": "cmd_watch",
+    "unwatch": "cmd_watch",
 }
 
 
@@ -122,6 +126,7 @@ COMMAND_FIELDS: list[SettingField] = [
     SettingField("cmd_ping", ".ping", "bool"),
     SettingField("cmd_say", ".say", "bool"),
     SettingField("cmd_view", ".view", "bool"),
+    SettingField("cmd_watch", ".watch / .unwatch", "bool"),
 ]
 
 MISC_FIELDS: list[SettingField] = [
@@ -155,6 +160,7 @@ class GlobalSettings:
     media_max_total_mb: int = 2048
 
     store_all_messages: bool = False  # писать вообще все входящие сообщения в БД
+    profile_watch_interval_min: int = 30  # как часто опрашивать watch-листы (имя/фото/username)
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False)
@@ -185,6 +191,7 @@ ADMIN_CACHE_FIELDS: list[SettingField] = [
     SettingField("cache_max_entries", "📥 Макс. записей в RAM-кэше", "int"),
     SettingField("cache_cleanup_interval_min", "🧹 Интервал очистки кэша (мин)", "int"),
     SettingField("media_max_total_mb", "🖼 Квота на медиа (МБ)", "int"),
+    SettingField("profile_watch_interval_min", "👁 Интервал опроса watch-листа (мин)", "int"),
 ]
 
 ADMIN_DATA_FIELDS: list[SettingField] = [

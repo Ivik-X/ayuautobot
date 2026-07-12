@@ -34,6 +34,9 @@ def main_settings_keyboard(digest_count: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🧩 Доп. функции", callback_data="us:open:extra")],
         [InlineKeyboardButton(text="🛠 Команды", callback_data="us:open:cmds")],
         [InlineKeyboardButton(text="🗂 Пресеты .say", callback_data="us:open:presets")],
+        [InlineKeyboardButton(text="📤 Экспорт переписки", callback_data="us:export")],
+        [InlineKeyboardButton(text="👁‍🗨 Последние сообщения", callback_data="us:recent")],
+        [InlineKeyboardButton(text="👻 Режим призрака", callback_data="us:open:ghost")],
         [InlineKeyboardButton(text="⚙️ Прочее", callback_data="us:open:misc")],
     ]
     if digest_count:
@@ -80,6 +83,69 @@ def presets_keyboard(names: list[str]) -> InlineKeyboardMarkup:
         )
     rows.append([InlineKeyboardButton(text="➕ Новый пресет", callback_data="us:preset:add")])
     rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="us:back")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def chats_export_keyboard(chats: list[tuple[int, str, int]]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for chat_id, title, count in chats[:20]:
+        label = f"{title} ({count})"
+        rows.append([InlineKeyboardButton(text=label, callback_data=f"us:export:chat:{chat_id}")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="us:back")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def chats_recent_keyboard(chats: list[tuple[int, str, int]]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for chat_id, title, count in chats[:20]:
+        label = f"{title} ({count})"
+        rows.append([InlineKeyboardButton(text=label, callback_data=f"us:recent:chat:{chat_id}")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="us:back")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def recent_count_keyboard(chat_id: int) -> InlineKeyboardMarkup:
+    counts = [10, 20, 50, 100]
+    row = [InlineKeyboardButton(text=str(n), callback_data=f"us:recent:show:{chat_id}:{n}") for n in counts]
+    return InlineKeyboardMarkup(inline_keyboard=[row, [InlineKeyboardButton(text="⬅️ Назад", callback_data="us:recent")]])
+
+
+def ghost_settings_keyboard(enabled: bool, operators: list) -> InlineKeyboardMarkup:
+    state = "✅" if enabled else "⬜️"
+    rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(text=f"{state} Режим призрака включён", callback_data="gs:toggle")],
+    ]
+    if enabled:
+        rows.append([InlineKeyboardButton(text="🔗 Привязать второй аккаунт", callback_data="gs:gencode")])
+        for op in operators:
+            label = f"👤 id{op['operator_user_id']} — отвязать"
+            rows.append([InlineKeyboardButton(text=label, callback_data=f"gs:unlink:{op['operator_user_id']}")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="us:back")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def ghost_picker_keyboard(chats: list[tuple[int, str, int, int, bool]]) -> InlineKeyboardMarkup:
+    """chats: (chat_id, title, total, unread, pinned) — уже отсортированы (закреплённые первыми)."""
+    rows: list[list[InlineKeyboardButton]] = []
+    for chat_id, title, _total, unread, pinned in chats[:25]:
+        prefix = "📌 " if pinned else ""
+        suffix = f" ({unread})" if unread else ""
+        rows.append([InlineKeyboardButton(text=f"{prefix}{title}{suffix}", callback_data=f"gh:open:{chat_id}")])
+    rows.append([InlineKeyboardButton(text="🔍 Поиск чата", callback_data="gh:search")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def ghost_session_keyboard(chat_id: int, *, pinned: bool, has_unread: bool) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if has_unread:
+        rows.append([InlineKeyboardButton(text="✅ Прочитать", callback_data=f"gh:read:{chat_id}")])
+    pin_label = "📌 Открепить" if pinned else "📌 Закрепить"
+    rows.append(
+        [
+            InlineKeyboardButton(text=pin_label, callback_data=f"gh:pin:{chat_id}"),
+            InlineKeyboardButton(text="⬅️ Список чатов", callback_data="gh:list"),
+        ]
+    )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -149,6 +215,7 @@ HELP_TOPICS: list[tuple[str, str]] = [
     ("cmd_ping", "🏓 .ping"),
     ("cmd_say", "🗣 .say"),
     ("cmd_view", "🕶 .view"),
+    ("cmd_watch", "👁 .watch / .unwatch"),
     ("feat_afk", "💤 Режим AFK"),
     ("feat_anon", "🎭 Анонимные стикеры"),
     ("feat_spoiler", "🙈 Анти-спойлер"),

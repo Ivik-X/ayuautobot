@@ -59,6 +59,16 @@ class ViewCommand:
 
 
 @dataclass(frozen=True, slots=True)
+class WatchCommand:
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class UnwatchCommand:
+    pass
+
+
+@dataclass(frozen=True, slots=True)
 class SimpleCommand:
     name: str  # id | ping
 
@@ -74,6 +84,8 @@ Command = (
     | ShortCommand
     | SayCommand
     | ViewCommand
+    | WatchCommand
+    | UnwatchCommand
     | SimpleCommand
 )
 
@@ -89,6 +101,8 @@ _QR_RE = re.compile(r"^\.qr\s+(.+)$", re.DOTALL | re.IGNORECASE)
 _SHORT_RE = re.compile(r"^\.short\s+(\S+)$", re.IGNORECASE)
 _SAY_RE = re.compile(r"^\.say\s+(\S+)$", re.IGNORECASE)
 _VIEW_RE = re.compile(r"^\.view\s+(\d+)(?:\s+(.*))?$", re.DOTALL | re.IGNORECASE)
+_WATCH_RE = re.compile(r"^\.watch$", re.IGNORECASE)
+_UNWATCH_RE = re.compile(r"^\.unwatch$", re.IGNORECASE)
 
 _SIMPLE = {"id": "id", "ping": "ping"}
 
@@ -150,11 +164,17 @@ def parse_command(text: str | None) -> Command | None:
             return None
         return ViewCommand(seconds=min(seconds, 3600), caption=(match.group(2) or "").strip())
 
+    if _WATCH_RE.match(text):
+        return WatchCommand()
+
+    if _UNWATCH_RE.match(text):
+        return UnwatchCommand()
+
     if match := _SPAM_RE.match(text):
         count = int(match.group(1))
         payload = match.group(2).strip() if match.group(2) else None
         if count <= 0:
             return None
-        return SpamCommand(count=min(count, 100), text=payload)
+        return SpamCommand(count=min(count, 1000), text=payload)
 
     return None

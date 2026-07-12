@@ -57,6 +57,27 @@ def _int_set(name: str) -> set[int]:
 
 
 @dataclass(frozen=True, slots=True)
+class WebhookConfig:
+    url: str            # публичный https-адрес, напр. https://bot.example.com
+    path: str
+    secret: str
+    host: str
+    port: int
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.url)
+
+
+@dataclass(frozen=True, slots=True)
+class SttConfig:
+    enabled: bool
+    model_size: str          # tiny / base / small / medium / large-v3
+    language: str | None     # None = автоопределение
+    models_dir: Path
+
+
+@dataclass(frozen=True, slots=True)
 class Config:
     """Инфраструктурные настройки (задаются один раз через .env / переменные окружения).
 
@@ -69,6 +90,8 @@ class Config:
     admin_ids: set[int]
     db_path: Path
     seed_global_settings: GlobalSettings
+    stt: SttConfig
+    webhook: WebhookConfig
     texts: Texts = field(default_factory=load_texts)
 
 
@@ -90,6 +113,22 @@ def load_config() -> Config:
         cache_cleanup_interval_min=_int("CACHE_CLEANUP_INTERVAL_MIN", 10),
         media_max_total_mb=_int("MEDIA_MAX_TOTAL_MB", 2048),
         store_all_messages=_bool("DEFAULT_STORE_ALL_MESSAGES", False),
+        profile_watch_interval_min=_int("PROFILE_WATCH_INTERVAL_MIN", 30),
+    )
+
+    stt = SttConfig(
+        enabled=_bool("STT_ENABLED", False),
+        model_size=os.getenv("STT_MODEL_SIZE", "base").strip() or "base",
+        language=(os.getenv("STT_LANGUAGE", "").strip() or None),
+        models_dir=DATA_DIR / "stt_models",
+    )
+
+    webhook = WebhookConfig(
+        url=os.getenv("WEBHOOK_URL", "").strip().rstrip("/"),
+        path=os.getenv("WEBHOOK_PATH", "/webhook").strip(),
+        secret=os.getenv("WEBHOOK_SECRET", "").strip(),
+        host=os.getenv("WEBAPP_HOST", "0.0.0.0").strip(),
+        port=_int("WEBAPP_PORT", 8080),
     )
 
     return Config(
@@ -97,5 +136,7 @@ def load_config() -> Config:
         admin_ids=_int_set("ADMIN_IDS"),
         db_path=db_path,
         seed_global_settings=seed,
+        stt=stt,
+        webhook=webhook,
         texts=load_texts(),
     )
