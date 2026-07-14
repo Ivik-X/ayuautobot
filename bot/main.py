@@ -16,7 +16,8 @@ from bot.backup import BackupManager
 from bot.cleanup import run_cleanup_loop, startup_cleanup
 from bot.config import load_config
 from bot.database import Database
-from bot.handlers import business, service
+from bot.diskguard import run_disk_guard_loop
+from bot.handlers import billing, business, service
 from bot.handlers import ghost as ghost_handlers
 from bot.storage import Storage
 from bot.watchers import run_profile_watch_loop
@@ -31,6 +32,7 @@ logger = logging.getLogger(__name__)
 ALLOWED_UPDATES = [
     "message",
     "callback_query",
+    "pre_checkout_query",
     "business_connection",
     "business_message",
     "edited_business_message",
@@ -66,6 +68,7 @@ async def main() -> None:
     dp["stt_config"] = config.stt
 
     dp.include_router(service.router)
+    dp.include_router(billing.router)
     dp.include_router(ghost_handlers.router)
     dp.include_router(business.router)
 
@@ -73,17 +76,18 @@ async def main() -> None:
         asyncio.create_task(run_cleanup_loop(storage)),
         asyncio.create_task(backup_manager.run_loop()),
         asyncio.create_task(run_profile_watch_loop(bot, storage)),
+        asyncio.create_task(run_disk_guard_loop(storage, backup_manager)),
     ]
 
     global_settings = storage.get_global()
     logger.info(
         "Бот запущен: кэш=%s записей, автобэкап=%s (каждые %sч), медиа-квота=%sМБ, "
-        "сохранять все сообщения=%s, админов=%s",
+        "мин. свободно на диске=%.1fГБ, админов=%s",
         global_settings.cache_max_entries,
         global_settings.backup_enabled,
         global_settings.backup_interval_hours,
         global_settings.media_max_total_mb,
-        global_settings.store_all_messages,
+        global_settings.min_free_disk_gb,
         len(config.admin_ids),
     )
     try:

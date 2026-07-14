@@ -24,13 +24,11 @@ class OwnerSettings:
     notify_delete_mode: str = "instant"     # off / instant / silent / digest
     notify_edit_mode: str = "instant"       # off / instant / silent / digest
     notify_own_deletions: bool = False      # показывать даже удаления, сделанные самим ботом (mute/.view/команды)
-    save_protected_media: bool = True       # пытаться сохранять одноразовые фото/гс/кружки
 
     # Доп. функции
     afk_enabled: bool = False
     afk_text: str = DEFAULT_AFK_TEXT
     anon_stickers: bool = False             # пересылать стикеры как картинку без ссылки на стикерпак
-    anti_spoiler: bool = False              # спойлеры собеседника дублировать без спойлера в ЛС с ботом
     anti_search: bool = False               # подменять буквы на визуальные twin-символы (антипоиск)
     ghost_mode_enabled: bool = False        # разрешить управление чатами через /ghost (себе и привязанным операторам)
 
@@ -103,13 +101,11 @@ NOTIFICATIONS_FIELDS: list[SettingField] = [
     SettingField("notify_delete_mode", "🗑 Удаления", "cycle", NOTIFY_MODES, NOTIFY_MODE_LABELS),
     SettingField("notify_edit_mode", "✏️ Правки", "cycle", NOTIFY_MODES, NOTIFY_MODE_LABELS),
     SettingField("notify_own_deletions", "🧹 Абсолютно все удаленки (даже от самого бота)", "bool"),
-    SettingField("save_protected_media", "🔒 Сохранять одноразовые фото/гс/кружки", "bool"),
 ]
 
 EXTRA_FIELDS: list[SettingField] = [
     SettingField("afk_enabled", "💤 Режим AFK (автоответ)", "bool"),
     SettingField("anon_stickers", "🎭 Анонимные стикеры", "bool"),
-    SettingField("anti_spoiler", "🙈 Анти-спойлер", "bool"),
     SettingField("anti_search", "🕵️ Антипоиск (подмена букв)", "bool"),
 ]
 
@@ -159,8 +155,24 @@ class GlobalSettings:
 
     media_max_total_mb: int = 2048
 
-    store_all_messages: bool = False  # писать вообще все входящие сообщения в БД
+    min_free_disk_gb: float = 5.0  # если свободного места на диске меньше — аварийная очистка (с бэкапом перед этим)
     profile_watch_interval_min: int = 30  # как часто опрашивать watch-листы (имя/фото/username)
+
+    # ------------------------------------------------------------- подписка
+    trial_days: int = 3
+    price_stars_per_month: int = 50
+
+    free_reveal_limit_month: int = 3        # сколько раз в месяц можно раскрыть скрытое уведомление
+    free_presets_max: int = 1               # максимум пресетов .say
+    free_spam_messages_month: int = 20      # лимит .spam на месяц (суммарно сообщений)
+    free_mute_seconds_month: int = 180      # лимит суммарной длительности .mute на месяц
+
+    free_view_enabled: bool = False
+    free_afk_enabled: bool = False
+    free_antisearch_enabled: bool = False
+    free_stt_enabled: bool = False
+    free_ghost_enabled: bool = False
+    free_extra_features_enabled: bool = False  # анонимные стикеры, .watch, экспорт, последние сообщения
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False)
@@ -195,10 +207,34 @@ ADMIN_CACHE_FIELDS: list[SettingField] = [
 ]
 
 ADMIN_DATA_FIELDS: list[SettingField] = [
-    SettingField("store_all_messages", "💾 Сохранять вообще все сообщения в БД", "bool"),
+    SettingField("min_free_disk_gb", "💾 Мин. свободно на диске (ГБ) до аварийной очистки", "float"),
 ]
 
-ALL_ADMIN_FIELDS = ADMIN_BACKUP_FIELDS + ADMIN_CACHE_FIELDS + ADMIN_DATA_FIELDS
+ADMIN_BILLING_FIELDS: list[SettingField] = [
+    SettingField("trial_days", "🎁 Длительность пробного периода (дней)", "int"),
+    SettingField("price_stars_per_month", "⭐ Цена подписки (звёзд/месяц)", "int"),
+]
+
+ADMIN_LIMITS_FIELDS: list[SettingField] = [
+    SettingField("free_reveal_limit_month", "🔓 Раскрытий скрытых уведомлений/мес", "int"),
+    SettingField("free_presets_max", "🗂 Макс. пресетов .say", "int"),
+    SettingField("free_spam_messages_month", "💬 Лимит .spam сообщений/мес", "int"),
+    SettingField("free_mute_seconds_month", "🔇 Лимит .mute секунд/мес", "int"),
+    SettingField("free_view_enabled", "🕶 .view доступен на бесплатном", "bool"),
+    SettingField("free_afk_enabled", "💤 AFK доступен на бесплатном", "bool"),
+    SettingField("free_antisearch_enabled", "🕵️ Антипоиск доступен на бесплатном", "bool"),
+    SettingField("free_stt_enabled", "🎙 Расшифровка гс доступна на бесплатном", "bool"),
+    SettingField("free_ghost_enabled", "👻 Режим призрака доступен на бесплатном", "bool"),
+    SettingField(
+        "free_extra_features_enabled",
+        "🧩 Остальное (анон. стикеры, .watch, экспорт, последние сообщения) доступно на бесплатном",
+        "bool",
+    ),
+]
+
+ALL_ADMIN_FIELDS = (
+    ADMIN_BACKUP_FIELDS + ADMIN_CACHE_FIELDS + ADMIN_DATA_FIELDS + ADMIN_BILLING_FIELDS + ADMIN_LIMITS_FIELDS
+)
 
 
 def get_admin_field(key: str) -> SettingField | None:

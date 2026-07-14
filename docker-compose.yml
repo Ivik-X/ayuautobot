@@ -1,7 +1,8 @@
 services:
   bot:
     build: .
-    image: ayuautobot:latest
+    image: ayuauto:latest
+    container_name: ayuauto-bot
     env_file: .env
     volumes:
       - ./data:/app/data

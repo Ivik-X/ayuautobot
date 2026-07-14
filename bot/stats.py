@@ -84,6 +84,7 @@ def format_admin_overview(
     backup_enabled: bool,
     backup_interval_hours: float,
     last_backup_ts: float | None,
+    total_stars: int = 0,
 ) -> str:
     import time as _time
 
@@ -101,5 +102,6 @@ def format_admin_overview(
         f"🖼 Медиа на диске: <b>{media_mb:.1f} МБ</b>\n\n"
         f"📦 Автобэкап: <b>{'вкл' if backup_enabled else 'выкл'}</b> "
         f"(каждые {backup_interval_hours:g} ч)\n"
-        f"🕓 Последний бэкап: {last_backup}"
+        f"🕓 Последний бэкап: {last_backup}\n\n"
+        f"⭐ Всего получено звёзд: <b>{total_stars}</b>"
     )

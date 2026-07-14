@@ -4,6 +4,7 @@ import asyncio
 import html
 import logging
 import uuid
+from pathlib import Path
 
 import aiohttp
 from aiogram import Bot, F, Router
@@ -19,6 +20,7 @@ from aiogram.types import (
     Message,
 )
 
+from bot import subscription
 from bot.commands import (
     MuteCommand,
     QrCommand,
@@ -91,7 +93,6 @@ async def on_business_message(
         await _cache_message(message, bot, storage, connection_id)
         await _apply_mute(message, bot, storage, connection_id)
         await _maybe_afk_reply(message, bot, storage, connection_id)
-        await _maybe_antispoiler(message, bot, storage, connection_id)
         await ghost_handlers.relay_live_message(bot, storage, connection_id, message.chat.id, message)
 
 
@@ -204,32 +205,10 @@ async def _ensure_connection(bot: Bot, storage: Storage, connection_id: str) -> 
         return None
 
 
-_MEDIA_LABELS = {
-    "photo": "фото",
-    "voice": "голосовое",
-    "video_note": "кружок",
-    "video": "видео",
-}
-
-
 async def _cache_message(message: Message, bot: Bot, storage: Storage, connection_id: str, *, bot_caused: bool = False) -> None:
-    settings = storage.get_settings_for_connection(connection_id)
     media = extract_media(message)
     if media is not None:
-        # content-protection (has_protected_content) — это отдельный флаг чата
-        # ("запрет пересылки"), он НЕ блокирует скачивание ботом и не имеет
-        # отношения к самоуничтожающимся ("одноразовым") медиа — поэтому
-        # всегда пробуем скачать, а не гадаем по этому флагу.
         media = await download_media(bot, media, message.message_id, connection_id)
-        if media.local_path is None and settings.save_protected_media and media.kind in _MEDIA_LABELS:
-            label = _MEDIA_LABELS[media.kind]
-            await _notify_owner(
-                bot, storage, connection_id,
-                f"🔒 Собеседник отправил {label}, но боту не удалось скачать файл (после повторной попытки). "
-                "Если это было одноразовое/самоуничтожающееся медиа — скорее всего, это ограничение "
-                "платформы Telegram для ботов, и обойти его через официальный Bot API нельзя. "
-                "Если это была обычная отправка — возможно, разовый сетевой сбой.",
-            )
     storage.cache_message(connection_id, message, media=media, bot_caused=bot_caused)
 
 
@@ -250,6 +229,9 @@ async def _maybe_afk_reply(message: Message, bot: Bot, storage: Storage, connect
     settings = storage.get_settings_for_connection(connection_id)
     if not settings.afk_enabled:
         return
+    owner_id = storage.owner_user_id(connection_id)
+    if owner_id is not None and not subscription.feature_allowed(storage, owner_id, "afk"):
+        return
     if not storage.should_send_afk_reply(connection_id, message.chat.id):
         return
     try:
@@ -260,32 +242,11 @@ async def _maybe_afk_reply(message: Message, bot: Bot, storage: Storage, connect
         logger.exception("Не удалось отправить AFK-автоответ")
 
 
-async def _maybe_antispoiler(message: Message, bot: Bot, storage: Storage, connection_id: str) -> None:
-    """Пересылает владельцу копию медиа со спойлером (has_media_spoiler) без спойлера.
-
-    Важно: это НЕ то же самое, что "одноразовые"/самоуничтожающиеся медиа —
-    спойлер (🙈 «нажмите, чтобы посмотреть») это отдельный, обычный флаг
-    сообщения, и такие фото/видео скачиваются ботом без ограничений.
-    """
-    settings = storage.get_settings_for_connection(connection_id)
-    if not settings.anti_spoiler or not message.has_media_spoiler:
-        return
-    media = extract_media(message)
-    if media is None:
-        return
-    owner_chat_id = storage.owner_chat_id(connection_id)
-    if owner_chat_id is None:
-        return
-    if media.local_path is None:
-        media = await download_media(bot, media, message.message_id, connection_id)
-    if media.local_path is None:
-        await _notify_owner(
-            bot, storage, connection_id,
-            "⚠️ Анти-спойлер: собеседник отправил медиа со спойлером, но боту не удалось "
-            "его скачать (см. логи контейнера — там будет точная причина ошибки).",
-        )
-        return
-    await send_media_copy(bot, owner_chat_id, media, caption="🙈 Спойлер снят (анти-спойлер)")
+async def _notify_upsell(bot: Bot, storage: Storage, connection_id: str, feature: str) -> None:
+    await _notify_owner(
+        bot, storage, connection_id,
+        f"⭐ Функция «{feature}» доступна только с подпиской. Оформить можно в /menu → 💫 Подписка.",
+    )
 
 
 # ----------------------------------------------------------------- notifications
@@ -302,6 +263,10 @@ async def _dispatch_notification(
     extra_before_media: MediaRef | None = None,
 ) -> None:
     if mode == "off":
+        return
+
+    if not subscription.is_premium(storage, owner_id):
+        await _send_teaser(bot, storage, connection_id, owner_id, kind, caption, media)
         return
 
     if mode == "digest":
@@ -327,6 +292,77 @@ async def _dispatch_notification(
             await bot.send_message(chat_id=owner_chat_id, text=caption, disable_notification=silent)
         except Exception:
             logger.exception("Не удалось отправить уведомление владельцу")
+
+
+KIND_LABEL_RU = {"delete": "удалено", "edit": "изменено"}
+
+
+async def _send_teaser(
+    bot: Bot, storage: Storage, connection_id: str, owner_id: int, kind: str, caption: str, media: MediaRef | None
+) -> None:
+    owner_chat_id = storage.owner_chat_id(connection_id)
+    if owner_chat_id is None:
+        return
+    row_id = storage.teaser_add(owner_id, kind, caption, media=media)
+    remaining = subscription.reveal_remaining(storage, owner_id)
+    label = KIND_LABEL_RU.get(kind, kind)
+
+    if remaining > 0:
+        text = (
+            f"🔒 Сообщение {label}, текст скрыт (бесплатный тариф).\n"
+            f"Осталось открытий в этом месяце: <b>{remaining}</b>"
+        )
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="🔓 Открыть", callback_data=f"reveal:{row_id}")]]
+        )
+    else:
+        text = (
+            f"🔒 Сообщение {label}, текст скрыт (бесплатный тариф) — лимит открытий на этот месяц исчерпан."
+        )
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="💫 Оформить подписку", callback_data="sub:menu")]]
+        )
+
+    try:
+        await bot.send_message(chat_id=owner_chat_id, text=text, reply_markup=keyboard)
+    except Exception:
+        logger.exception("Не удалось отправить тизер-уведомление")
+
+
+@router.callback_query(F.data.startswith("reveal:"))
+async def cb_reveal(call: CallbackQuery, storage: Storage) -> None:
+    row_id = int(call.data.split(":", 1)[1])
+    row = storage.teaser_get(row_id)
+    if row is None:
+        await call.answer("Уже открыто или устарело", show_alert=True)
+        return
+    owner_id = call.from_user.id
+    if int(row["owner_id"]) != owner_id:
+        await call.answer("Недоступно", show_alert=True)
+        return
+
+    if not subscription.consume_reveal(storage, owner_id):
+        await call.answer("Лимит открытий на этот месяц исчерпан", show_alert=True)
+        return
+
+    storage.teaser_delete(row_id)
+    media = None
+    if row["media_kind"] and row["media_file_id"]:
+        local_path = Path(row["media_path"]) if row["media_path"] else None
+        media = MediaRef(
+            kind=row["media_kind"], file_id=row["media_file_id"],
+            local_path=local_path if local_path and local_path.exists() else None,
+        )
+
+    await call.answer()
+    if media is not None:
+        await send_media_copy(bot=call.bot, owner_chat_id=call.message.chat.id, media=media, caption=row["payload"])
+    else:
+        await call.message.answer(row["payload"])
+    try:
+        await call.message.delete()
+    except Exception:
+        pass
 
 
 async def _notify_owner(bot: Bot, storage: Storage, connection_id: str, text: str) -> None:
@@ -377,6 +413,9 @@ async def _handle_owner_message(
         if not message.photo:
             await _notify_owner(bot, storage, connection_id, "❌ .view работает только при отправке фото с этой подписью.")
             return
+        if owner_id is not None and not subscription.feature_allowed(storage, owner_id, "view"):
+            await _notify_upsell(bot, storage, connection_id, ".view")
+            return
         await _handle_view(message, bot, storage, connection_id, command)
         return
 
@@ -385,15 +424,22 @@ async def _handle_owner_message(
 
     if command is None:
         if settings.anti_search and message.text and not message.text.startswith("."):
-            await _apply_antisearch(message, bot, connection_id)
+            if owner_id is None or subscription.feature_allowed(storage, owner_id, "antisearch"):
+                await _apply_antisearch(message, bot, connection_id)
         elif settings.anon_stickers and message.sticker and not (message.sticker.is_animated or message.sticker.is_video):
-            await _anonymize_sticker(message, bot, storage, connection_id)
+            if owner_id is None or subscription.feature_allowed(storage, owner_id, "extra"):
+                await _anonymize_sticker(message, bot, storage, connection_id)
         return
 
     name = _command_name(command)
     flag = COMMAND_FLAG.get(name) if name else None
     if flag and not getattr(settings, flag, True):
         return  # команда выключена владельцем в /settings
+
+    if isinstance(command, (WatchCommand, UnwatchCommand)) and owner_id is not None:
+        if not subscription.feature_allowed(storage, owner_id, "extra"):
+            await _notify_upsell(bot, storage, connection_id, ".watch")
+            return
 
     storage.mark_bot_deleted(connection_id, chat_id, message.message_id)
     try:
@@ -412,11 +458,24 @@ async def _dispatch(
         if command.count > SPAM_CONFIRM_THRESHOLD:
             await _request_spam_confirmation(command, message, bot, storage, connection_id, chat_id, owner_id)
         else:
-            await _run_spam(command, message, bot, storage, connection_id, chat_id)
+            await _run_spam(command, message, bot, storage, connection_id, chat_id, owner_id)
         return
 
     if isinstance(command, MuteCommand):
         seconds = command.seconds if command.seconds is not None else settings.mute_default_seconds
+        if owner_id is not None:
+            allowed_seconds = subscription.mute_allowance(storage, owner_id, seconds)
+            if allowed_seconds <= 0:
+                await _notify_upsell(bot, storage, connection_id, ".mute (лимит бесплатного тарифа исчерпан)")
+                return
+            if allowed_seconds < seconds:
+                await _notify_owner(
+                    bot, storage, connection_id,
+                    f"⚠️ На бесплатном тарифе доступно только {allowed_seconds} из {seconds} сек — "
+                    "mute включён на урезанное время. Снять лимит: /menu → 💫 Подписка.",
+                )
+            subscription.consume_mute(storage, owner_id, allowed_seconds)
+            seconds = allowed_seconds
         storage.start_mute(connection_id, chat_id, seconds=seconds)
         await _notify_owner(bot, storage, connection_id, f"🔇 Mute включён на <b>{seconds}</b> сек.")
         return
@@ -509,6 +568,7 @@ async def _request_spam_confirmation(
         "message": message,
         "connection_id": connection_id,
         "chat_id": chat_id,
+        "owner_id": owner_id,
     }
     asyncio.create_task(_expire_spam_token(token))
 
@@ -551,7 +611,7 @@ async def cb_spam_confirm(call: CallbackQuery, bot: Bot, storage: Storage) -> No
         return
     await call.answer("Отправляю…")
     await call.message.edit_text(call.message.text + "\n\n✅ Подтверждено, отправляю…")
-    await _run_spam(entry["command"], entry["message"], bot, storage, entry["connection_id"], entry["chat_id"])
+    await _run_spam(entry["command"], entry["message"], bot, storage, entry["connection_id"], entry["chat_id"], entry["owner_id"])
 
 
 @router.callback_query(F.data.startswith("spam:no:"))
@@ -563,19 +623,36 @@ async def cb_spam_cancel(call: CallbackQuery) -> None:
         await call.message.edit_text(call.message.text + "\n\n❌ Отменено.")
 
 
-async def _run_spam(command: SpamCommand, message: Message, bot: Bot, storage: Storage, connection_id: str, chat_id: int) -> None:
+async def _run_spam(
+    command: SpamCommand, message: Message, bot: Bot, storage: Storage, connection_id: str, chat_id: int,
+    owner_id: int | None,
+) -> None:
+    allowed_count = command.count
+    if owner_id is not None:
+        allowed_count = subscription.spam_allowance(storage, owner_id, command.count)
+        if allowed_count <= 0:
+            await _notify_upsell(bot, storage, connection_id, ".spam (лимит бесплатного тарифа исчерпан)")
+            return
+        if allowed_count < command.count:
+            await _notify_owner(
+                bot, storage, connection_id,
+                f"⚠️ На бесплатном тарифе доступно только {allowed_count} из {command.count} — "
+                "остальное отправлено не будет. Снять лимит: /menu → 💫 Подписка.",
+            )
+        subscription.consume_spam(storage, owner_id, allowed_count)
+
     if command.text is not None:
         media = extract_media(message)
-        for index in range(command.count):
+        for index in range(allowed_count):
             try:
                 if media is not None:
                     await send_media_to_chat(bot, connection_id, chat_id, media, caption=command.text)
                 else:
                     await bot.send_message(chat_id=chat_id, text=command.text, business_connection_id=connection_id)
             except Exception:
-                logger.exception("Ошибка spam %s/%s", index + 1, command.count)
+                logger.exception("Ошибка spam %s/%s", index + 1, allowed_count)
                 break
-            if index + 1 < command.count:
+            if index + 1 < allowed_count:
                 await asyncio.sleep(0.05)
         return
 
@@ -590,7 +667,7 @@ async def _run_spam(command: SpamCommand, message: Message, bot: Bot, storage: S
 
     media = extract_media(reply)
     reply_text = reply.text or reply.caption
-    for index in range(command.count):
+    for index in range(allowed_count):
         try:
             if media is not None:
                 await send_media_to_chat(
@@ -601,9 +678,9 @@ async def _run_spam(command: SpamCommand, message: Message, bot: Bot, storage: S
             else:
                 break
         except Exception:
-            logger.exception("Ошибка spam (reply) %s/%s", index + 1, command.count)
+            logger.exception("Ошибка spam (reply) %s/%s", index + 1, allowed_count)
             break
-        if index + 1 < command.count:
+        if index + 1 < allowed_count:
             await asyncio.sleep(0.05)
 
 
@@ -719,8 +796,11 @@ async def _anonymize_sticker(message: Message, bot: Bot, storage: Storage, conne
     try:
         storage.mark_bot_deleted(connection_id, chat_id, message.message_id)
         await bot.delete_business_messages(business_connection_id=connection_id, message_ids=[message.message_id])
-        photo = BufferedInputFile(data, filename="sticker.png")
-        await bot.send_photo(chat_id=chat_id, photo=photo, business_connection_id=connection_id)
+        # Загружаем стикер заново как НОВЫЙ файл (а не по старому file_id) —
+        # тогда он не привязан ни к какому стикерпаку, и у собеседника не
+        # появляется возможность через него перейти/добавить исходный пак.
+        upload = BufferedInputFile(data, filename="sticker.webp")
+        await bot.send_sticker(chat_id=chat_id, sticker=upload, business_connection_id=connection_id)
     except Exception:
         logger.exception("Не удалось анонимизировать стикер")
 

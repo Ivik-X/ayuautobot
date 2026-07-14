@@ -13,8 +13,9 @@ from aiogram.types import CallbackQuery, FSInputFile, Message
 
 from bot.backup import BackupManager
 from bot.media import MEDIA_DIR, MediaRef, directory_size_bytes, download_bytes, extract_media, send_media_copy
-from bot import ghost
+from bot import ghost, subscription
 from bot.config import SttConfig
+from bot.handlers import billing as billing_handlers
 from bot.handlers import ghost as ghost_handlers
 from bot.features.chat_export import build_export_html, build_export_json
 from bot.features.stt_local import SttError, transcribe_local
@@ -27,9 +28,11 @@ from bot.keyboards import (
     ghost_settings_keyboard,
     help_back_keyboard,
     help_topics_keyboard,
-    main_settings_keyboard,
+    menu_keyboard,
+    notifications_keyboard,
     preset_creation_keyboard,
     presets_keyboard,
+    promo_list_keyboard,
     recent_count_keyboard,
     section_keyboard,
 )
@@ -52,6 +55,8 @@ ADMIN_SECTION_TITLES = {
     "backup": "📦 Бэкапы",
     "cache": "📥 Кэш и медиа",
     "data": "💾 Данные",
+    "billing": "💫 Подписка: цена и пробный период",
+    "limits": "🚦 Лимиты бесплатного тарифа",
 }
 
 # user_id -> состояние текущего диалогового шага (ввод текста/сбор пресета)
@@ -64,7 +69,10 @@ async def cmd_start(message: Message, storage: Storage, texts: Texts) -> None:
     is_admin = storage.is_admin(message.from_user.id)
     storage.db.ensure_owner(message.from_user.id, is_admin=is_admin)
     hint = DEFAULT_ADMIN_HINT if is_admin else ""
-    await message.answer(texts.start.replace("{admin_hint}", hint))
+    me = await message.bot.get_me()
+    username = f"@{me.username}" if me.username else "имя бота из его профиля"
+    text = texts.start.replace("{admin_hint}", hint).replace("{bot_username}", username)
+    await message.answer(text)
 
 
 # ------------------------------------------------------------------------- /help
@@ -99,10 +107,22 @@ async def help_close(call: CallbackQuery) -> None:
 async def cmd_settings(message: Message, storage: Storage) -> None:
     owner_id = message.from_user.id
     storage.db.ensure_owner(owner_id, is_admin=storage.is_admin(owner_id))
+    settings = storage.get_settings(owner_id)
     digest_count = storage.queue_count(owner_id)
     await message.answer(
-        "<b>⚙️ Ваши настройки</b>\nВыберите раздел:",
-        reply_markup=main_settings_keyboard(digest_count),
+        "<b>🔔 Уведомления</b>",
+        reply_markup=notifications_keyboard(settings, digest_count),
+    )
+
+
+# -------------------------------------------------------------------------- /menu
+@router.message(Command("menu"))
+async def cmd_menu(message: Message, storage: Storage) -> None:
+    owner_id = message.from_user.id
+    storage.db.ensure_owner(owner_id, is_admin=storage.is_admin(owner_id))
+    await message.answer(
+        "<b>📋 Меню</b>\nВыберите раздел:",
+        reply_markup=menu_keyboard(),
     )
 
 
@@ -115,10 +135,8 @@ async def us_close(call: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "us:back")
 async def us_back(call: CallbackQuery, storage: Storage) -> None:
-    owner_id = call.from_user.id
-    digest_count = storage.queue_count(owner_id)
     await call.message.edit_text(
-        "<b>⚙️ Ваши настройки</b>\nВыберите раздел:", reply_markup=main_settings_keyboard(digest_count)
+        "<b>📋 Меню</b>\nВыберите раздел:", reply_markup=menu_keyboard()
     )
     await call.answer()
 
@@ -217,14 +235,18 @@ async def us_digest(call: CallbackQuery, storage: Storage) -> None:
             await call.bot.send_message(call.message.chat.id, row["payload"])
     storage.queue_clear(owner_id)
     digest_count = storage.queue_count(owner_id)
+    settings = storage.get_settings(owner_id)
     await call.message.edit_text(
-        "<b>⚙️ Ваши настройки</b>\nВыберите раздел:", reply_markup=main_settings_keyboard(digest_count)
+        "<b>🔔 Уведомления</b>", reply_markup=notifications_keyboard(settings, digest_count)
     )
 
 
 @router.callback_query(F.data == "us:export")
 async def us_export(call: CallbackQuery, storage: Storage) -> None:
     owner_id = call.from_user.id
+    if not subscription.feature_allowed(storage, owner_id, "extra"):
+        await call.answer("⭐ Экспорт доступен только с подпиской. /menu → 💫 Подписка.", show_alert=True)
+        return
     connection_ids = storage.connections_for_owner(owner_id)
     chats: list[tuple[int, str, int]] = []
     for connection_id in connection_ids:
@@ -233,14 +255,15 @@ async def us_export(call: CallbackQuery, storage: Storage) -> None:
 
     if not chats:
         await call.answer(
-            "Пока нет сохранённых сообщений для экспорта. Включите «сохранять все сообщения» "
-            "в /admin → 💾 Данные, если хотите копить историю для экспорта.",
+            "Пока нет сохранённых сообщений — история появится сама по мере переписки.",
             show_alert=True,
         )
         return
 
     await call.message.edit_text(
-        "<b>📤 Экспорт переписки</b>\nВыберите чат (в скобках — число сохранённых сообщений):",
+        "<b>📤 Экспорт последней истории</b>\nЭто не полный архив чата, а то, что бот успел сохранить "
+        "локально (старое может быть уже вытеснено бэкапом/очисткой).\nВыберите чат "
+        "(в скобках — число сохранённых сообщений):",
         reply_markup=chats_export_keyboard(chats),
     )
     await call.answer()
@@ -302,6 +325,9 @@ def _safe_filename(name: str) -> str:
 @router.callback_query(F.data == "us:recent")
 async def us_recent(call: CallbackQuery, storage: Storage) -> None:
     owner_id = call.from_user.id
+    if not subscription.feature_allowed(storage, owner_id, "extra"):
+        await call.answer("⭐ Доступно только с подпиской. /menu → 💫 Подписка.", show_alert=True)
+        return
     connection_ids = storage.connections_for_owner(owner_id)
     chats: list[tuple[int, str, int]] = []
     for connection_id in connection_ids:
@@ -310,7 +336,7 @@ async def us_recent(call: CallbackQuery, storage: Storage) -> None:
 
     if not chats:
         await call.answer(
-            "Пока нет сохранённых сообщений. Включите «сохранять все сообщения» в /admin → 💾 Данные.",
+            "Пока нет сохранённых сообщений — история появится сама по мере переписки.",
             show_alert=True,
         )
         return
@@ -410,6 +436,10 @@ def _ghost_settings_kb(storage: Storage, owner_id: int):
 @router.callback_query(F.data == "gs:toggle")
 async def gs_toggle(call: CallbackQuery, storage: Storage) -> None:
     owner_id = call.from_user.id
+    current = storage.get_settings(owner_id).ghost_mode_enabled
+    if not current and not subscription.feature_allowed(storage, owner_id, "ghost"):
+        await call.answer("⭐ Режим призрака доступен только с подпиской. /menu → 💫 Подписка.", show_alert=True)
+        return
     storage.toggle_setting(owner_id, "ghost_mode_enabled")
     await call.message.edit_text(_ghost_settings_text(storage, owner_id), reply_markup=_ghost_settings_kb(storage, owner_id))
     await call.answer("Сохранено")
@@ -456,8 +486,14 @@ async def us_preset_del(call: CallbackQuery, storage: Storage) -> None:
 
 
 @router.callback_query(F.data == "us:preset:add")
-async def us_preset_add(call: CallbackQuery) -> None:
-    _pending[call.from_user.id] = {"kind": "preset_name"}
+async def us_preset_add(call: CallbackQuery, storage: Storage) -> None:
+    owner_id = call.from_user.id
+    current_count = len(storage.preset_list(owner_id))
+    if not subscription.presets_allowed(storage, owner_id, current_count):
+        limit = storage.get_global().free_presets_max
+        await call.answer(f"⭐ На бесплатном тарифе доступно максимум {limit} пресетов. /menu → 💫 Подписка.", show_alert=True)
+        return
+    _pending[owner_id] = {"kind": "preset_name"}
     await call.answer()
     await call.message.answer("Введите имя нового пресета (одно слово, буквы/цифры/подчёркивание):")
 
@@ -497,6 +533,7 @@ def _admin_overview_text(storage: Storage, backup: BackupManager) -> str:
         backup_enabled=settings.backup_enabled,
         backup_interval_hours=settings.backup_interval_hours,
         last_backup_ts=backup.last_backup_ts,
+        total_stars=storage.payments_total_stars(),
     )
 
 
@@ -605,13 +642,61 @@ async def ad_cancel(call: CallbackQuery) -> None:
     await call.answer("Отменено")
 
 
+@router.callback_query(F.data == "ad:promo:list")
+async def ad_promo_list(call: CallbackQuery, storage: Storage) -> None:
+    if not storage.is_admin(call.from_user.id):
+        await call.answer()
+        return
+    promos = storage.promo_list()
+    text = "<b>🎟 Промокоды</b>\n" + ("Список ниже." if promos else "Пока нет ни одного промокода.")
+    await call.message.edit_text(text, reply_markup=promo_list_keyboard(promos))
+    await call.answer()
+
+
+@router.callback_query(F.data == "ad:promo:add")
+async def ad_promo_add(call: CallbackQuery, storage: Storage) -> None:
+    if not storage.is_admin(call.from_user.id):
+        await call.answer()
+        return
+    _pending[call.from_user.id] = {"kind": "promo_create"}
+    await call.answer()
+    await call.message.answer(
+        "Отправьте одной строкой: <code>тип значение макс_исп срок_дней</code>\n\n"
+        "• тип — <code>discount</code> (скидка в %) или <code>free_days</code> (дней полного доступа)\n"
+        "• макс_исп — сколько раз можно использовать код всего\n"
+        "• срок_дней — через сколько дней код сгорит (0 — бессрочно)\n\n"
+        "Например: <code>free_days 30 5 60</code> — 30 дней доступа, максимум 5 активаций, "
+        "код действует 60 дней.",
+    )
+
+
+@router.callback_query(F.data.startswith("ad:promo:del:"))
+async def ad_promo_del(call: CallbackQuery, storage: Storage) -> None:
+    if not storage.is_admin(call.from_user.id):
+        await call.answer()
+        return
+    code = call.data.split(":", 3)[3]
+    storage.promo_delete(code)
+    promos = storage.promo_list()
+    await call.message.edit_reply_markup(reply_markup=promo_list_keyboard(promos))
+    await call.answer("Удалено")
+
+
 # ------------------------------------------------------------- catch-all private input
-@router.message(F.chat.type == "private")
+def _not_a_command(message: Message) -> bool:
+    if message.successful_payment is not None:
+        return False
+    return not (message.text and message.text.startswith("/"))
+
+
+@router.message(F.chat.type == "private", _not_a_command)
 async def private_input(message: Message, storage: Storage, stt_config: SttConfig) -> None:
     user_id = message.from_user.id
     state = _pending.get(user_id)
 
     if state is None:
+        if await billing_handlers.handle_promo_input(message, storage):
+            return
         if await ghost_handlers.handle_search_input(message, storage):
             return
         if await ghost_handlers.handle_session_relay(message, storage):
@@ -619,7 +704,7 @@ async def private_input(message: Message, storage: Storage, stt_config: SttConfi
         # Голосовые/кружки/аудио, отправленные боту напрямую (не часть другого
         # диалога) — расшифровываем, если настроен STT.
         if message.voice or message.video_note or message.audio:
-            await _handle_stt(message, stt_config)
+            await _handle_stt(message, storage, stt_config)
         return
 
     kind = state["kind"]
@@ -716,10 +801,34 @@ async def private_input(message: Message, storage: Storage, stt_config: SttConfi
         await message.answer(f"Отправлено {sent} из {len(rows)}.")
         return
 
+    if kind == "promo_create":
+        if not storage.is_admin(user_id):
+            _pending.pop(user_id, None)
+            return
+        _pending.pop(user_id, None)
+        parts = (message.text or "").split()
+        if len(parts) != 4 or parts[0] not in ("discount", "free_days"):
+            await message.answer("❌ Формат: <code>тип значение макс_исп срок_дней</code>. Попробуйте через меню ещё раз.")
+            return
+        promo_kind, value_s, max_uses_s, expires_s = parts
+        try:
+            value = float(value_s)
+            max_uses = int(max_uses_s)
+            expires_days = float(expires_s) or None
+        except ValueError:
+            await message.answer("❌ Значение/макс_исп/срок должны быть числами.")
+            return
+        code = subscription.create_promo(storage, promo_kind, value, max_uses, expires_days)
+        await message.answer(f"✅ Промокод создан: <code>{code}</code>")
+        return
 
-async def _handle_stt(message: Message, stt_config: SttConfig) -> None:
+
+async def _handle_stt(message: Message, storage: Storage, stt_config: SttConfig) -> None:
     if not stt_config.enabled:
         return  # STT выключен (STT_ENABLED=false в .env) — молчим, чтобы не спамить объяснением на каждое гс
+    if not subscription.feature_allowed(storage, message.from_user.id, "stt"):
+        await message.answer("⭐ Расшифровка голосовых доступна только с подпиской. /menu → 💫 Подписка.")
+        return
     media = extract_media(message)
     if media is None:
         return

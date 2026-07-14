@@ -4,8 +4,10 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from bot.settings import (
     ADMIN_BACKUP_FIELDS,
+    ADMIN_BILLING_FIELDS,
     ADMIN_CACHE_FIELDS,
     ADMIN_DATA_FIELDS,
+    ADMIN_LIMITS_FIELDS,
     COMMAND_FIELDS,
     EXTRA_FIELDS,
     MISC_FIELDS,
@@ -24,21 +26,40 @@ ADMIN_SECTION_FIELDS = {
     "backup": ADMIN_BACKUP_FIELDS,
     "cache": ADMIN_CACHE_FIELDS,
     "data": ADMIN_DATA_FIELDS,
+    "billing": ADMIN_BILLING_FIELDS,
+    "limits": ADMIN_LIMITS_FIELDS,
 }
 
 
 # --------------------------------------------------------------- user /settings
-def main_settings_keyboard(digest_count: int) -> InlineKeyboardMarkup:
+def menu_keyboard() -> InlineKeyboardMarkup:
     rows = [
-        [InlineKeyboardButton(text="🔔 Уведомления", callback_data="us:open:notif")],
-        [InlineKeyboardButton(text="🧩 Доп. функции", callback_data="us:open:extra")],
         [InlineKeyboardButton(text="🛠 Команды", callback_data="us:open:cmds")],
+        [InlineKeyboardButton(text="🧩 Доп. функции", callback_data="us:open:extra")],
         [InlineKeyboardButton(text="🗂 Пресеты .say", callback_data="us:open:presets")],
-        [InlineKeyboardButton(text="📤 Экспорт переписки", callback_data="us:export")],
+        [InlineKeyboardButton(text="📤 Экспорт последней истории", callback_data="us:export")],
         [InlineKeyboardButton(text="👁‍🗨 Последние сообщения", callback_data="us:recent")],
         [InlineKeyboardButton(text="👻 Режим призрака", callback_data="us:open:ghost")],
+        [InlineKeyboardButton(text="💫 Подписка", callback_data="sub:menu")],
         [InlineKeyboardButton(text="⚙️ Прочее", callback_data="us:open:misc")],
     ]
+    rows.append([InlineKeyboardButton(text="✖️ Закрыть", callback_data="us:close")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def notifications_keyboard(settings: OwnerSettings, digest_count: int) -> InlineKeyboardMarkup:
+    """Экран /settings — только уведомления, ничего больше."""
+    rows: list[list[InlineKeyboardButton]] = []
+    for f in NOTIFICATIONS_FIELDS:
+        value = getattr(settings, f.key)
+        if f.kind == "bool":
+            state = "✅" if value else "⬜️"
+            rows.append([InlineKeyboardButton(text=f"{state} {f.label}", callback_data=f"us:toggle:notif:{f.key}")])
+        elif f.kind == "cycle":
+            label = (f.labels or {}).get(value, str(value))
+            rows.append(
+                [InlineKeyboardButton(text=f"{f.label}: {label}", callback_data=f"us:cycle:notif:{f.key}")]
+            )
     if digest_count:
         rows.append(
             [InlineKeyboardButton(text=f"📬 Показать уведомления ({digest_count})", callback_data="us:digest")]
@@ -116,6 +137,7 @@ def ghost_settings_keyboard(enabled: bool, operators: list) -> InlineKeyboardMar
         [InlineKeyboardButton(text=f"{state} Режим призрака включён", callback_data="gs:toggle")],
     ]
     if enabled:
+        rows.append([InlineKeyboardButton(text="📂 Открыть чаты", callback_data="gh:list")])
         rows.append([InlineKeyboardButton(text="🔗 Привязать второй аккаунт", callback_data="gs:gencode")])
         for op in operators:
             label = f"👤 id{op['operator_user_id']} — отвязать"
@@ -168,6 +190,9 @@ def admin_main_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="📦 Бэкапы", callback_data="ad:open:backup")],
         [InlineKeyboardButton(text="📥 Кэш и медиа", callback_data="ad:open:cache")],
         [InlineKeyboardButton(text="💾 Данные", callback_data="ad:open:data")],
+        [InlineKeyboardButton(text="💫 Подписка: цена и пробный период", callback_data="ad:open:billing")],
+        [InlineKeyboardButton(text="🚦 Лимиты бесплатного тарифа", callback_data="ad:open:limits")],
+        [InlineKeyboardButton(text="🎟 Промокоды", callback_data="ad:promo:list")],
         [InlineKeyboardButton(text="👥 Пользователи", callback_data="ad:open:users")],
         [InlineKeyboardButton(text="📤 Сделать бэкап сейчас", callback_data="ad:backupnow")],
         [InlineKeyboardButton(text="📢 Рассылка всем", callback_data="ad:broadcast")],
@@ -201,6 +226,22 @@ def admin_cancel_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="ad:cancel")]])
 
 
+def promo_list_keyboard(promos: list) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for p in promos:
+        used = f"{p['used_count']}/{p['max_uses']}"
+        label = f"🎟 {p['code']} ({p['kind']}={p['value']:g}, {used})"
+        rows.append(
+            [
+                InlineKeyboardButton(text=label, callback_data="ad:noop"),
+                InlineKeyboardButton(text="🗑", callback_data=f"ad:promo:del:{p['code']}"),
+            ]
+        )
+    rows.append([InlineKeyboardButton(text="➕ Новый промокод", callback_data="ad:promo:add")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="ad:back")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 # -------------------------------------------------------------------- /help
 HELP_TOPICS: list[tuple[str, str]] = [
     ("cmd_spam", "💬 .spam"),
@@ -218,7 +259,6 @@ HELP_TOPICS: list[tuple[str, str]] = [
     ("cmd_watch", "👁 .watch / .unwatch"),
     ("feat_afk", "💤 Режим AFK"),
     ("feat_anon", "🎭 Анонимные стикеры"),
-    ("feat_spoiler", "🙈 Анти-спойлер"),
     ("feat_search", "🕵️ Антипоиск"),
     ("feat_notify", "🔔 Уведомления"),
 ]

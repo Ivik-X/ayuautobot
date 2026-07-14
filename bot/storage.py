@@ -189,17 +189,14 @@ class Storage:
             unlink_media(old.media)
         self._cache.set(key, cached)
 
-        if self.get_global().store_all_messages or self._ghost_needs_history(connection_id):
-            owner_id = self.owner_user_id(connection_id)
-            self._db.upsert_message(cached, title, owner_id, bot_caused=bot_caused)
+        # Всегда пишем в БД — иначе после рестарта контейнера вся история и
+        # RAM-кэш теряются одновременно. Место на диске контролируется не
+        # тумблером "сохранять или нет", а бэкапами по расписанию и аварийной
+        # очисткой по нехватке места (см. bot.diskguard).
+        owner_id = self.owner_user_id(connection_id)
+        self._db.upsert_message(cached, title, owner_id, bot_caused=bot_caused)
 
         return cached
-
-    def _ghost_needs_history(self, connection_id: str) -> bool:
-        owner_id = self.owner_user_id(connection_id)
-        if owner_id is None:
-            return False
-        return self.get_settings(owner_id).ghost_mode_enabled
 
     def find_cached(self, connection_id: str, chat_id: int, message_id: int) -> CachedMessage | None:
         for key in _lookup_keys(connection_id, chat_id, message_id):
@@ -395,6 +392,66 @@ class Storage:
 
     def ghost_operators_for_owner(self, owner_id: int):
         return self._db.ghost_operators_for_owner(owner_id)
+
+    # -------------------------------------------------------------- billing
+    def sub_get(self, owner_id: int):
+        return self._db.sub_ensure(owner_id)
+
+    def sub_start_trial(self, owner_id: int, trial_days: int) -> None:
+        self._db.sub_start_trial(owner_id, trial_days)
+
+    def sub_extend_paid(self, owner_id: int, days: float) -> None:
+        self._db.sub_extend_paid(owner_id, days)
+
+    def sub_set_discount(self, owner_id: int, percent: int | None) -> None:
+        self._db.sub_set_discount(owner_id, percent)
+
+    def sub_downgrade_to_free(self, owner_id: int) -> None:
+        self._db.sub_downgrade_to_free(owner_id)
+
+    def usage_get(self, owner_id: int, month_key: str):
+        return self._db.usage_get(owner_id, month_key)
+
+    def usage_increment(self, owner_id: int, month_key: str, field: str, amount: int) -> None:
+        self._db.usage_increment(owner_id, month_key, field, amount)
+
+    def promo_create(self, code: str, kind: str, value: float, max_uses: int, expires_at: float | None) -> None:
+        self._db.promo_create(code, kind, value, max_uses, expires_at)
+
+    def promo_get(self, code: str):
+        return self._db.promo_get(code)
+
+    def promo_list(self):
+        return self._db.promo_list()
+
+    def promo_delete(self, code: str) -> None:
+        self._db.promo_delete(code)
+
+    def promo_mark_used(self, code: str, owner_id: int) -> None:
+        self._db.promo_mark_used(code, owner_id)
+
+    def promo_already_used(self, code: str, owner_id: int) -> bool:
+        return self._db.promo_already_used(code, owner_id)
+
+    def payment_add(self, owner_id: int, stars_amount: int, telegram_charge_id: str | None) -> None:
+        self._db.payment_add(owner_id, stars_amount, telegram_charge_id)
+
+    def payments_total_stars(self) -> int:
+        return self._db.payments_total_stars()
+
+    def teaser_add(self, owner_id: int, kind: str, payload: str, *, media=None) -> int:
+        return self._db.queue_add_returning_id(
+            owner_id, kind, payload,
+            media_kind=media.kind if media else None,
+            media_file_id=media.file_id if media else None,
+            media_path=str(media.local_path) if media and media.local_path else None,
+        )
+
+    def teaser_get(self, row_id: int):
+        return self._db.queue_get(row_id)
+
+    def teaser_delete(self, row_id: int) -> None:
+        self._db.queue_delete(row_id)
 
     # ------------------------------------------------------ notifications queue
     def queue_add(

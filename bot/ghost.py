@@ -4,6 +4,7 @@ import secrets
 import time
 from dataclasses import dataclass
 
+from bot import subscription
 from bot.storage import Storage
 
 CODE_TTL_SECONDS = 300          # 5 минут на ввод кода привязки
@@ -73,14 +74,14 @@ def resolve_operator_scope(storage: Storage, user_id: int) -> tuple[int, str] | 
     own_connections = storage.connections_for_owner(user_id)
     if own_connections:
         settings = storage.get_settings(user_id)
-        if settings.ghost_mode_enabled:
+        if settings.ghost_mode_enabled and subscription.feature_allowed(storage, user_id, "ghost"):
             return user_id, own_connections[0]
 
     link = storage.ghost_operator_owner(user_id)
     if link is not None:
         owner_id = int(link["owner_id"])
         settings = storage.get_settings(owner_id)
-        if settings.ghost_mode_enabled:
+        if settings.ghost_mode_enabled and subscription.feature_allowed(storage, owner_id, "ghost"):
             connections = storage.connections_for_owner(owner_id)
             if connections:
                 return owner_id, connections[0]

@@ -101,6 +101,50 @@ class Database:
                 created_at    REAL NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS subscriptions (
+                owner_id       INTEGER PRIMARY KEY,
+                tier           TEXT NOT NULL DEFAULT 'free',
+                trial_used     INTEGER NOT NULL DEFAULT 0,
+                trial_until    REAL,
+                paid_until     REAL,
+                discount_percent INTEGER,
+                updated_at     REAL NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS usage_counters (
+                owner_id     INTEGER NOT NULL,
+                month_key    TEXT NOT NULL,
+                reveal_count INTEGER NOT NULL DEFAULT 0,
+                spam_count   INTEGER NOT NULL DEFAULT 0,
+                mute_seconds INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (owner_id, month_key)
+            );
+
+            CREATE TABLE IF NOT EXISTS promo_codes (
+                code         TEXT PRIMARY KEY,
+                kind         TEXT NOT NULL,
+                value        REAL NOT NULL,
+                max_uses     INTEGER NOT NULL DEFAULT 1,
+                used_count   INTEGER NOT NULL DEFAULT 0,
+                expires_at   REAL,
+                created_at   REAL NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS promo_redemptions (
+                code        TEXT NOT NULL,
+                owner_id    INTEGER NOT NULL,
+                redeemed_at REAL NOT NULL,
+                PRIMARY KEY (code, owner_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS payments (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner_id          INTEGER NOT NULL,
+                stars_amount      INTEGER NOT NULL,
+                telegram_charge_id TEXT,
+                created_at        REAL NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS ghost_operators (
                 operator_user_id INTEGER PRIMARY KEY,
                 owner_id         INTEGER NOT NULL,
@@ -373,6 +417,34 @@ class Database:
         result.sort(key=lambda item: item[1].total, reverse=True)
         return result
 
+    def purge_oldest_batch(self, batch_size: int) -> int:
+        """Удаляет batch_size самых старых сообщений (по всем владельцам) — для
+        аварийной очистки по нехватке места на диске. Возвращает число удалённых.
+        """
+        rows = self._conn.execute(
+            "SELECT connection_id, chat_id, message_id, media_path FROM messages ORDER BY cached_at LIMIT ?",
+            (batch_size,),
+        ).fetchall()
+        if not rows:
+            return 0
+        for row in rows:
+            if row["media_path"]:
+                _unlink_path(row["media_path"])
+            self._conn.execute(
+                "DELETE FROM messages WHERE connection_id=? AND chat_id=? AND message_id=?",
+                (row["connection_id"], row["chat_id"], row["message_id"]),
+            )
+        self._conn.execute(
+            """
+            DELETE FROM chat_stats
+            WHERE (connection_id, chat_id) NOT IN (
+                SELECT DISTINCT connection_id, chat_id FROM messages
+            )
+            """
+        )
+        self._conn.commit()
+        return len(rows)
+
     def purge_older_than(self, hours: float) -> int:
         if hours <= 0:
             return 0
@@ -490,6 +562,34 @@ class Database:
         self._conn.execute("DELETE FROM notifications_queue WHERE owner_id=?", (owner_id,))
         self._conn.commit()
 
+    def queue_get(self, row_id: int) -> sqlite3.Row | None:
+        return self._conn.execute("SELECT * FROM notifications_queue WHERE id=?", (row_id,)).fetchone()
+
+    def queue_delete(self, row_id: int) -> None:
+        self._conn.execute("DELETE FROM notifications_queue WHERE id=?", (row_id,))
+        self._conn.commit()
+
+    def queue_add_returning_id(
+        self,
+        owner_id: int,
+        kind: str,
+        payload: str,
+        *,
+        media_kind: str | None = None,
+        media_file_id: str | None = None,
+        media_path: str | None = None,
+    ) -> int:
+        cur = self._conn.execute(
+            """
+            INSERT INTO notifications_queue
+                (owner_id, kind, payload, media_kind, media_file_id, media_path, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (owner_id, kind, payload, media_kind, media_file_id, media_path, time.time()),
+        )
+        self._conn.commit()
+        return int(cur.lastrowid)
+
     # ------------------------------------------------------------- global settings
     def get_global_settings_raw(self) -> str | None:
         row = self._conn.execute("SELECT data FROM global_settings WHERE id=1").fetchone()
@@ -562,6 +662,126 @@ class Database:
             "SELECT * FROM messages WHERE connection_id=? AND chat_id=? ORDER BY cached_at",
             (connection_id, chat_id),
         ).fetchall()
+
+    # ----------------------------------------------------------- subscriptions
+    def sub_get(self, owner_id: int) -> sqlite3.Row | None:
+        return self._conn.execute("SELECT * FROM subscriptions WHERE owner_id=?", (owner_id,)).fetchone()
+
+    def sub_ensure(self, owner_id: int) -> sqlite3.Row:
+        row = self.sub_get(owner_id)
+        if row is not None:
+            return row
+        self._conn.execute(
+            "INSERT INTO subscriptions (owner_id, tier, trial_used, updated_at) VALUES (?, 'free', 0, ?)",
+            (owner_id, time.time()),
+        )
+        self._conn.commit()
+        return self.sub_get(owner_id)
+
+    def sub_start_trial(self, owner_id: int, trial_days: int) -> None:
+        self.sub_ensure(owner_id)
+        until = time.time() + trial_days * 86400
+        self._conn.execute(
+            """
+            UPDATE subscriptions SET tier='trial', trial_used=1, trial_until=?, updated_at=?
+            WHERE owner_id=?
+            """,
+            (until, time.time(), owner_id),
+        )
+        self._conn.commit()
+
+    def sub_extend_paid(self, owner_id: int, days: float) -> None:
+        row = self.sub_ensure(owner_id)
+        base = row["paid_until"] or time.time()
+        base = max(base, time.time())
+        new_until = base + days * 86400
+        self._conn.execute(
+            "UPDATE subscriptions SET tier='paid', paid_until=?, updated_at=? WHERE owner_id=?",
+            (new_until, time.time(), owner_id),
+        )
+        self._conn.commit()
+
+    def sub_set_discount(self, owner_id: int, percent: int | None) -> None:
+        self.sub_ensure(owner_id)
+        self._conn.execute(
+            "UPDATE subscriptions SET discount_percent=?, updated_at=? WHERE owner_id=?",
+            (percent, time.time(), owner_id),
+        )
+        self._conn.commit()
+
+    def sub_downgrade_to_free(self, owner_id: int) -> None:
+        self._conn.execute(
+            "UPDATE subscriptions SET tier='free', updated_at=? WHERE owner_id=?", (time.time(), owner_id)
+        )
+        self._conn.commit()
+
+    # ---------------------------------------------------------------- usage
+    def usage_get(self, owner_id: int, month_key: str) -> sqlite3.Row:
+        row = self._conn.execute(
+            "SELECT * FROM usage_counters WHERE owner_id=? AND month_key=?", (owner_id, month_key)
+        ).fetchone()
+        if row is not None:
+            return row
+        self._conn.execute(
+            "INSERT INTO usage_counters (owner_id, month_key) VALUES (?, ?)", (owner_id, month_key)
+        )
+        self._conn.commit()
+        return self._conn.execute(
+            "SELECT * FROM usage_counters WHERE owner_id=? AND month_key=?", (owner_id, month_key)
+        ).fetchone()
+
+    def usage_increment(self, owner_id: int, month_key: str, field: str, amount: int) -> None:
+        self.usage_get(owner_id, month_key)
+        self._conn.execute(
+            f"UPDATE usage_counters SET {field} = {field} + ? WHERE owner_id=? AND month_key=?",
+            (amount, owner_id, month_key),
+        )
+        self._conn.commit()
+
+    # ------------------------------------------------------------ promo codes
+    def promo_create(self, code: str, kind: str, value: float, max_uses: int, expires_at: float | None) -> None:
+        self._conn.execute(
+            "INSERT INTO promo_codes (code, kind, value, max_uses, used_count, expires_at, created_at) "
+            "VALUES (?, ?, ?, ?, 0, ?, ?)",
+            (code.upper(), kind, value, max_uses, expires_at, time.time()),
+        )
+        self._conn.commit()
+
+    def promo_get(self, code: str) -> sqlite3.Row | None:
+        return self._conn.execute("SELECT * FROM promo_codes WHERE code=?", (code.upper(),)).fetchone()
+
+    def promo_list(self) -> list[sqlite3.Row]:
+        return self._conn.execute("SELECT * FROM promo_codes ORDER BY created_at DESC").fetchall()
+
+    def promo_delete(self, code: str) -> None:
+        self._conn.execute("DELETE FROM promo_codes WHERE code=?", (code.upper(),))
+        self._conn.commit()
+
+    def promo_mark_used(self, code: str, owner_id: int) -> None:
+        self._conn.execute("UPDATE promo_codes SET used_count = used_count + 1 WHERE code=?", (code.upper(),))
+        self._conn.execute(
+            "INSERT OR IGNORE INTO promo_redemptions (code, owner_id, redeemed_at) VALUES (?, ?, ?)",
+            (code.upper(), owner_id, time.time()),
+        )
+        self._conn.commit()
+
+    def promo_already_used(self, code: str, owner_id: int) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM promo_redemptions WHERE code=? AND owner_id=?", (code.upper(), owner_id)
+        ).fetchone()
+        return row is not None
+
+    # --------------------------------------------------------------- payments
+    def payment_add(self, owner_id: int, stars_amount: int, telegram_charge_id: str | None) -> None:
+        self._conn.execute(
+            "INSERT INTO payments (owner_id, stars_amount, telegram_charge_id, created_at) VALUES (?, ?, ?, ?)",
+            (owner_id, stars_amount, telegram_charge_id, time.time()),
+        )
+        self._conn.commit()
+
+    def payments_total_stars(self) -> int:
+        row = self._conn.execute("SELECT COALESCE(SUM(stars_amount), 0) FROM payments").fetchone()
+        return int(row[0]) if row else 0
 
     # ------------------------------------------------------------- ghost mode
     def unread_messages(self, connection_id: str, chat_id: int, owner_id: int) -> list[sqlite3.Row]:
@@ -717,10 +937,7 @@ class Database:
 
     def trim_after_backup(self, keep_hours: float) -> int:
         removed = self.purge_older_than(keep_hours)
-        try:
-            self._conn.execute("VACUUM")
-        except sqlite3.OperationalError:
-            logger.warning("VACUUM пропущен (БД занята)")
+        self.vacuum()
         return removed
 
     def file_size_bytes(self) -> int:
@@ -728,6 +945,12 @@ class Database:
             return self.path.stat().st_size
         except OSError:
             return 0
+
+    def vacuum(self) -> None:
+        try:
+            self._conn.execute("VACUUM")
+        except sqlite3.OperationalError:
+            logger.warning("VACUUM пропущен (БД занята)")
 
 
 def _unlink_path(path_str: str) -> None:

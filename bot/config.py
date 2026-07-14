@@ -112,7 +112,7 @@ def load_config() -> Config:
         cache_max_entries=_int("CACHE_MAX_ENTRIES", 800),
         cache_cleanup_interval_min=_int("CACHE_CLEANUP_INTERVAL_MIN", 10),
         media_max_total_mb=_int("MEDIA_MAX_TOTAL_MB", 2048),
-        store_all_messages=_bool("DEFAULT_STORE_ALL_MESSAGES", False),
+        min_free_disk_gb=_float("MIN_FREE_DISK_GB", 5.0),
         profile_watch_interval_min=_int("PROFILE_WATCH_INTERVAL_MIN", 30),
     )
 
