@@ -458,28 +458,63 @@ class Database:
         self._conn.commit()
         return len(rows)
 
-    def purge_older_than(self, hours: float) -> int:
+    def purge_media_older_than(self, hours: float) -> int:
+        """Удаляет медиафайлы старше hours часов из БД-записей (обнуляет media_path),
+        но САМИ СТРОКИ ИЗ БД НЕ УДАЛЯЕТ. Тексты сообщений хранятся в БД бессрочно
+        (до срабатывания enforce_db_size_limit).
+
+        Возвращает число очищенных медиа-ссылок.
+        """
         if hours <= 0:
             return 0
         cutoff = time.time() - hours * 3600
         rows = self._conn.execute(
-            "SELECT media_path FROM messages WHERE cached_at < ? AND media_path IS NOT NULL",
+            "SELECT rowid, media_path FROM messages WHERE cached_at < ? AND media_path IS NOT NULL",
             (cutoff,),
         ).fetchall()
+        if not rows:
+            return 0
         for row in rows:
             _unlink_path(row["media_path"])
-
-        cur = self._conn.execute("DELETE FROM messages WHERE cached_at < ?", (cutoff,))
+        rowids = [row[0] for row in rows]
+        placeholders = ",".join("?" for _ in rowids)
         self._conn.execute(
-            """
-            DELETE FROM chat_stats
-            WHERE (connection_id, chat_id) NOT IN (
-                SELECT DISTINCT connection_id, chat_id FROM messages
-            )
-            """
+            f"UPDATE messages SET media_path=NULL WHERE rowid IN ({placeholders})",
+            rowids,
         )
         self._conn.commit()
-        return cur.rowcount
+        return len(rows)
+
+    def purge_older_than(self, hours: float) -> int:
+        """Устаревший метод (оставлен для обратной совместимости).
+        Сейчас делегирует в purge_media_older_than — удаляет только медиафайлы, строки БД не трогает.
+        """
+        return self.purge_media_older_than(hours)
+
+    def enforce_db_size_limit(self, max_size_gb: float, batch_size: int = 500) -> int:
+        """Если размер Файла БД превышает max_size_gb ГБ — удаляет самые старые строки батчами,
+        пока размер не впишется в лимит (или больше нечего удалять).
+
+        Возвращает число удалённых строк.
+        """
+        if max_size_gb <= 0:
+            return 0
+        max_bytes = int(max_size_gb * 1024 ** 3)
+        removed_total = 0
+        for _ in range(200):  # не больше 200 батчей за раз — защита от бесконечного цикла
+            current_size = self.file_size_bytes()
+            if current_size <= max_bytes:
+                break
+            removed = self.purge_oldest_batch(batch_size)
+            removed_total += removed
+            if removed == 0:
+                break
+        if removed_total:
+            logger.info(
+                "Лимит БД (%.1f ГБ): удалено %s старых записей, файл БД остался %.1f ГБ",
+                max_size_gb, removed_total, self.file_size_bytes() / 1024 ** 3,
+            )
+        return removed_total
 
     def _row_to_cached(self, row: sqlite3.Row) -> CachedMessage:
         flags = json.loads(row["flags"]) if row["flags"] else None

@@ -32,6 +32,7 @@ from bot.keyboards import (
     notifications_keyboard,
     preset_creation_keyboard,
     presets_keyboard,
+    promo_list_keyboard,
     recent_count_keyboard,
     section_keyboard,
 )
@@ -119,15 +120,19 @@ async def cmd_menu(message: Message, storage: Storage) -> None:
     storage.db.ensure_owner(owner_id, is_admin=storage.is_admin(owner_id))
     connections = storage.connections_for_owner(owner_id)
     conn_count = len(connections)
-    cached_cnt = storage.cached_count()
+    db_count = storage.db_count()
     status_icon = "🟢" if conn_count else "🟡"
-    status_text = f"Активных аккаунтов: <b>{conn_count}</b>" if conn_count else "<i>Чат-бот пока не привязан</i>"
+    status_text = (
+        f"Активных аккаунтов: <b>{conn_count}</b>"
+        if conn_count
+        else "<i>Бот пока не привязан к аккаунту</i>"
+    )
 
     text = (
-        f"{status_icon} <b>Панель управления AyuAutoBot</b>\n\n"
+        f"{status_icon} <b>AyuAutoBot — Панель управления</b>\n\n"
         f"🔗 <b>Статус:</b> {status_text}\n"
-        f"📥 <b>Кэш сообщений:</b> <b>{cached_cnt}</b> элементов\n\n"
-        "Выберите необходимый раздел ниже:"
+        f"📊 <b>Сообщений в БД:</b> <b>{db_count}</b>\n\n"
+        "Выберите необходимый раздел:"
     )
     await message.answer(text, reply_markup=menu_keyboard())
 
@@ -144,15 +149,19 @@ async def us_back(call: CallbackQuery, storage: Storage) -> None:
     owner_id = call.from_user.id
     connections = storage.connections_for_owner(owner_id)
     conn_count = len(connections)
-    cached_cnt = storage.cached_count()
+    db_count = storage.db_count()
     status_icon = "🟢" if conn_count else "🟡"
-    status_text = f"Активных аккаунтов: <b>{conn_count}</b>" if conn_count else "<i>Чат-бот пока не привязан</i>"
+    status_text = (
+        f"Активных аккаунтов: <b>{conn_count}</b>"
+        if conn_count
+        else "<i>Бот пока не привязан к аккаунту</i>"
+    )
 
     text = (
-        f"{status_icon} <b>Панель управления AyuAutoBot</b>\n\n"
+        f"{status_icon} <b>AyuAutoBot — Панель управления</b>\n\n"
         f"🔗 <b>Статус:</b> {status_text}\n"
-        f"📥 <b>Кэш сообщений:</b> <b>{cached_cnt}</b> элементов\n\n"
-        "Выберите необходимый раздел ниже:"
+        f"📊 <b>Сообщений в БД:</b> <b>{db_count}</b>\n\n"
+        "Выберите необходимый раздел:"
     )
     await call.message.edit_text(text, reply_markup=menu_keyboard())
     await call.answer()
@@ -654,6 +663,12 @@ async def ad_cancel(call: CallbackQuery) -> None:
     await call.answer("Отменено")
 
 
+@router.callback_query(F.data == "ad:noop")
+async def ad_noop(call: CallbackQuery) -> None:
+    """Заглушка для кнопок без действия (например, заголовки строк в списке промокодов)."""
+    await call.answer()
+
+
 @router.callback_query(F.data == "ad:promo:list")
 async def ad_promo_list(call: CallbackQuery, storage: Storage) -> None:
     if not storage.is_admin(call.from_user.id):
@@ -844,19 +859,44 @@ async def private_input(message: Message, storage: Storage, stt_config: SttConfi
 async def _handle_stt(message: Message, storage: Storage, stt_config: SttConfig) -> None:
     if not stt_config.enabled or message.from_user is None:
         return  # STT выключен (STT_ENABLED=false в .env) — молчим
+
     media = extract_media(message)
     if media is None:
         return
+
+    # Только голосовые/кружки/аудио
+    if media.kind not in ("voice", "video_note", "audio"):
+        return
+
+    # Определяем источник для подписи (особенно важно для пересланных ГС)
+    source_note = ""
+    if message.forward_origin:
+        origin = message.forward_origin
+        if hasattr(origin, "sender_user") and origin.sender_user:
+            source_note = f" (от {origin.sender_user.full_name})"
+        elif hasattr(origin, "sender_user_name") and origin.sender_user_name:
+            source_note = f" (от {origin.sender_user_name})"
+        elif hasattr(origin, "chat") and origin.chat:
+            source_note = f" (из {origin.chat.full_name or origin.chat.username or 'канала'})"
+
+    status = await message.answer(
+        f"🎙 Распознаю{source_note} (первый запуск может занять время — грузится модель)…"
+    )
+
     data = await download_bytes(message.bot, media.file_id)
     if data is None:
-        await message.answer("❌ Не удалось скачать файл для распознавания.")
+        await status.edit_text(
+            "❌ Не удалось скачать файл для распознавания.\n"
+            "<i>Возможно, это одноразовое или защищённое сообщение — Telegram не даёт его скачать.</i>"
+        )
         return
-    status = await message.answer("🎙 Распознаю локально (первый запуск может занять время — грузится модель)…")
+
     try:
         text = await transcribe_local(
             data, model_size=stt_config.model_size, models_dir=stt_config.models_dir, language=stt_config.language
         )
-        await status.edit_text(f"📝 <b>Расшифровка:</b>\n{text}")
+        header = f"📝 <b>Расшифровка{source_note}:</b>"
+        await status.edit_text(f"{header}\n{text}")
     except SttError as exc:
         await status.edit_text(f"❌ Не удалось распознать: {exc}")
 

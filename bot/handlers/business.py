@@ -224,7 +224,8 @@ async def _ensure_connection(bot: Bot, storage: Storage, connection_id: str) -> 
 async def _cache_message(message: Message, bot: Bot, storage: Storage, connection_id: str, *, bot_caused: bool = False) -> None:
     media = extract_media(message)
     if media is not None:
-        media = await download_media(bot, media, message.message_id, connection_id)
+        max_file_mb = storage.get_global().media_max_file_mb
+        media = await download_media(bot, media, message.message_id, connection_id, max_file_mb=max_file_mb)
     storage.cache_message(connection_id, message, media=media, bot_caused=bot_caused)
 
 
@@ -563,6 +564,7 @@ _SPAM_CONFIRM_TTL = 600  # секунд, на сколько живёт непо
 
 # token -> {"command", "message", "connection_id", "chat_id"}
 _pending_spam: dict[str, dict] = {}
+_spam_expire_tasks: set[asyncio.Task] = set()  # держим ссылки чтобы GC не собирал раньше времени
 
 
 async def _request_spam_confirmation(
@@ -580,7 +582,9 @@ async def _request_spam_confirmation(
         "chat_id": chat_id,
         "owner_id": owner_id,
     }
-    asyncio.create_task(_expire_spam_token(token))
+    task = asyncio.create_task(_expire_spam_token(token))
+    _spam_expire_tasks.add(task)
+    task.add_done_callback(_spam_expire_tasks.discard)
 
     if command.text is not None:
         preview = html.escape(command.text[:200])

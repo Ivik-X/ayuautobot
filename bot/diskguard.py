@@ -45,9 +45,14 @@ async def _check_once(storage: Storage, backup: BackupManager) -> None:
         removed = storage.db.purge_oldest_batch(PURGE_BATCH_SIZE)
         removed_total += removed
         if removed == 0:
-            break  # больше нечего удалять
+            break
 
     if removed_total:
+        storage.db.vacuum()
+
+    # Дополнительно: проверяем лимит размера БД
+    db_removed = storage.db.enforce_db_size_limit(storage.get_global().db_max_size_gb)
+    if db_removed:
         storage.db.vacuum()
 
     logger.warning(

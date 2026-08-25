@@ -147,15 +147,21 @@ class GlobalSettings:
 
     backup_enabled: bool = True
     backup_interval_hours: float = 12
-    backup_keep_local_hours: float = 0  # 0 = хранить локальную историю бессрочно
+    backup_keep_local_hours: float = 0  # 0 = не удалять строки из БД после бэкапа
     backup_compress: bool = True
 
     cache_max_entries: int = 5000
     cache_cleanup_interval_min: int = 10
 
-    media_max_total_mb: int = 2048
+    # Медиафайлы на диске (data/media/)
+    media_max_total_mb: int = 7168          # квота на суммарный объём медиа (МБ, дефолт 7 ГБ)
+    media_max_age_hours: float = 48.0       # TTL медиафайлов: старше этого — удалять при очистке
+    media_max_file_mb: int = 50             # файлы тяжелее этого — не скачивать вообще
 
-    min_free_disk_gb: float = 5.0  # если свободного места на диске меньше — аварийная очистка (с бэкапом перед этим)
+    # БД
+    db_max_size_gb: float = 20.0            # лимит размера БД: при превышении удаляются самые старые строки
+
+    min_free_disk_gb: float = 5.0  # если свободного места на диске меньше — аварийная очистка
     profile_watch_interval_min: int = 30  # как часто опрашивать watch-листы (имя/фото/username)
 
     # ------------------------------------------------------------- подписка
@@ -202,7 +208,10 @@ ADMIN_BACKUP_FIELDS: list[SettingField] = [
 ADMIN_CACHE_FIELDS: list[SettingField] = [
     SettingField("cache_max_entries", "📥 Макс. записей в RAM-кэше", "int"),
     SettingField("cache_cleanup_interval_min", "🧹 Интервал очистки кэша (мин)", "int"),
-    SettingField("media_max_total_mb", "🖼 Квота на медиа (МБ)", "int"),
+    SettingField("media_max_total_mb", "🖼 Квота медиа на диске (МБ)", "int"),
+    SettingField("media_max_age_hours", "⏰ TTL медиафайлов (часы)", "float"),
+    SettingField("media_max_file_mb", "📦 Макс. размер одного файла (МБ)", "int"),
+    SettingField("db_max_size_gb", "💾 Лимит размера БД (ГБ)", "float"),
     SettingField("profile_watch_interval_min", "👁 Интервал опроса watch-листа (мин)", "int"),
 ]
 

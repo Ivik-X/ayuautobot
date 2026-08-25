@@ -31,22 +31,22 @@ ADMIN_SECTION_FIELDS = {
 def menu_keyboard() -> InlineKeyboardMarkup:
     rows = [
         [
-            InlineKeyboardButton(text="🛠 Команды", callback_data="us:open:cmds"),
             InlineKeyboardButton(text="🔔 Уведомления", callback_data="us:open:notif"),
-        ],
-        [
             InlineKeyboardButton(text="🧩 Доп. функции", callback_data="us:open:extra"),
-            InlineKeyboardButton(text="🗂 Пресеты .say", callback_data="us:open:presets"),
         ],
         [
-            InlineKeyboardButton(text="📤 Экспорт истории", callback_data="us:export"),
-            InlineKeyboardButton(text="👁‍🗨 Сообщения", callback_data="us:recent"),
-        ],
-        [
-            InlineKeyboardButton(text="👻 Режим призрака", callback_data="us:open:ghost"),
+            InlineKeyboardButton(text="🛠 Команды", callback_data="us:open:cmds"),
             InlineKeyboardButton(text="⚙️ Параметры", callback_data="us:open:misc"),
         ],
-        [InlineKeyboardButton(text="✖️ Закрыть меню", callback_data="us:close")],
+        [
+            InlineKeyboardButton(text="🗂 Пресеты .say", callback_data="us:open:presets"),
+            InlineKeyboardButton(text="👻 Режим призрака", callback_data="us:open:ghost"),
+        ],
+        [
+            InlineKeyboardButton(text="💬 Последние сообщения", callback_data="us:recent"),
+            InlineKeyboardButton(text="📤 Экспорт истории", callback_data="us:export"),
+        ],
+        [InlineKeyboardButton(text="✖️ Закрыть", callback_data="us:close")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -191,10 +191,15 @@ def close_keyboard() -> InlineKeyboardMarkup:
 # -------------------------------------------------------------------- /admin
 def admin_main_keyboard() -> InlineKeyboardMarkup:
     rows = [
-        [InlineKeyboardButton(text="📦 Бэкапы", callback_data="ad:open:backup")],
-        [InlineKeyboardButton(text="📥 Кэш и медиа", callback_data="ad:open:cache")],
-        [InlineKeyboardButton(text="💾 Данные", callback_data="ad:open:data")],
-        [InlineKeyboardButton(text="👥 Пользователи", callback_data="ad:open:users")],
+        [
+            InlineKeyboardButton(text="📦 Бэкапы", callback_data="ad:open:backup"),
+            InlineKeyboardButton(text="🖼 Кэш и медиа", callback_data="ad:open:cache"),
+        ],
+        [
+            InlineKeyboardButton(text="💾 Данные", callback_data="ad:open:data"),
+            InlineKeyboardButton(text="👥 Пользователи", callback_data="ad:open:users"),
+        ],
+        [InlineKeyboardButton(text="🎟 Промокоды", callback_data="ad:promo:list")],
         [InlineKeyboardButton(text="📤 Сделать бэкап сейчас", callback_data="ad:backupnow")],
         [InlineKeyboardButton(text="📢 Рассылка всем", callback_data="ad:broadcast")],
         [InlineKeyboardButton(text="✖️ Закрыть", callback_data="ad:close")],
@@ -231,7 +236,12 @@ def promo_list_keyboard(promos: list) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     for p in promos:
         used = f"{p['used_count']}/{p['max_uses']}"
-        label = f"🎟 {p['code']} ({p['kind']}={p['value']:g}, {used})"
+        exp = ""
+        if p["expires_at"]:
+            import time as _t
+            days_left = max(0, int((p["expires_at"] - _t.time()) / 86400))
+            exp = f", осталось {days_left}d"
+        label = f"🎟 {p['code']} ({p['kind']}={p['value']:g}, {used}{exp})"
         rows.append(
             [
                 InlineKeyboardButton(text=label, callback_data="ad:noop"),

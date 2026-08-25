@@ -524,36 +524,101 @@ def _user_label(message: Message) -> str:
 
 
 def describe_message(message: Message) -> str:
+    """Converts a Telegram Message to a human-readable string for storage/display."""
     if message.text:
         return message.text
     if message.caption:
         return message.caption
 
     parts: list[str] = []
+
+    # Основные типы медиа
     if message.photo:
         parts.append("📷 фото")
     if message.video:
-        parts.append("🎬 видео")
+        dur = f" ({message.video.duration}с)" if message.video.duration else ""
+        parts.append(f"🎥 видео{dur}")
     if message.voice:
-        parts.append("🎤 голосовое")
+        dur = f" ({message.voice.duration}с)" if message.voice.duration else ""
+        parts.append(f"🎤 голосовое{dur}")
     if message.video_note:
-        parts.append("⭕ кружок")
+        dur = f" ({message.video_note.duration}с)" if message.video_note.duration else ""
+        parts.append(f"⭕ кружок{dur}")
     if message.audio:
-        parts.append("🎵 аудио")
+        title = message.audio.title or message.audio.file_name or "аудио"
+        dur = f" ({message.audio.duration}с)" if message.audio.duration else ""
+        parts.append(f"🎵 {title}{dur}")
     if message.document:
         name = message.document.file_name or "файл"
-        parts.append(f"📎 {name}")
+        size_kb = (message.document.file_size or 0) // 1024
+        size_str = f" ({size_kb} КБ)" if size_kb else ""
+        parts.append(f"📎 {name}{size_str}")
     if message.sticker:
-        emoji = message.sticker.emoji or "стикер"
-        parts.append(f"🙂 {emoji}")
+        emoji = message.sticker.emoji or ""
+        kind = ""
+        if message.sticker.is_animated:
+            kind = " (аним.)"
+        elif message.sticker.is_video:
+            kind = " (видео)"
+        parts.append(f"🙂 стикер {emoji}{kind}")
     if message.animation:
         parts.append("GIF")
+
+    # Специальные типы
     if message.location:
-        parts.append("📍 геолокация")
+        lat = f"{message.location.latitude:.4f}"
+        lon = f"{message.location.longitude:.4f}"
+        live = " (живая)" if message.location.live_period else ""
+        parts.append(f"📍 геолокация{live} {lat},{lon}")
     if message.contact:
-        parts.append("👤 контакт")
+        name = f"{message.contact.first_name} {message.contact.last_name or ''}".strip()
+        phone = message.contact.phone_number
+        parts.append(f"👤 контакт: {name} ({phone})")
     if message.poll:
-        parts.append(f"📊 опрос: {message.poll.question}")
+        kind = "викторина" if message.poll.type == "quiz" else "голосование"
+        options = ", ".join(o.text for o in message.poll.options[:3])
+        if len(message.poll.options) > 3:
+            options += "…"
+        parts.append(f"📊 {kind}: {message.poll.question}  [{options}]")
+    if message.dice:
+        emoji_map = {"🎰": "слот", "🎯": "дарт", "🏀": "баскетбол", "⚽": "футбол", "🎳": "боулинг"}
+        name = emoji_map.get(message.dice.emoji, "кубик")
+        parts.append(f"{message.dice.emoji} {name}: {message.dice.value}")
+    if message.game:
+        parts.append(f"🎮 игра: {message.game.title}")
+    if message.invoice:
+        price = f"{message.invoice.total_amount / 100:.2f} {message.invoice.currency}"
+        parts.append(f"💳 счёт: {message.invoice.title} — {price}")
+    if getattr(message, "gift", None):
+        # gift появился в aiogram 3.14+
+        gift = message.gift  # type: ignore[attr-defined]
+        sticker_emoji = getattr(getattr(gift, "gift", None), "sticker", None)
+        sticker_str = getattr(sticker_emoji, "emoji", "") if sticker_emoji else ""
+        parts.append(f"🎁 подарок {sticker_str}")
+    if getattr(message, "unique_gift", None):
+        parts.append("🌟 уникальный подарок")
+    if message.pinned_message:
+        pinned_text = message.pinned_message.text or message.pinned_message.caption or describe_message(message.pinned_message)
+        short = pinned_text[:80] + ("…" if len(pinned_text) > 80 else "")
+        parts.append(f"📌 закреплено: {short}")
+
+    # Пересылка
+    if message.forward_origin:
+        origin = message.forward_origin
+        sender = ""
+        if hasattr(origin, "sender_user") and origin.sender_user:
+            sender = f" от {origin.sender_user.full_name}"
+        elif hasattr(origin, "sender_chat") and origin.sender_chat:
+            sender = f" из {origin.sender_chat.full_name or origin.sender_chat.username or ''}"
+        elif hasattr(origin, "sender_user_name") and origin.sender_user_name:
+            sender = f" от {origin.sender_user_name}"
+        elif hasattr(origin, "chat") and origin.chat:
+            sender = f" из {origin.chat.full_name or origin.chat.username or ''}"
+        if sender and parts:
+            parts[-1] = parts[-1] + f" [➡️ переслано{sender}]"
+        elif sender:
+            parts.append(f"➡️ пересланное{sender}")
+
     if not parts:
         return "[сообщение без текста]"
     return " ".join(parts)

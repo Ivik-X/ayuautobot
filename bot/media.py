@@ -85,9 +85,11 @@ def extract_media(message: Message) -> MediaRef | None:
 def media_flags(message: Message) -> list[str]:
     flags: list[str] = []
     if message.has_protected_content:
-        flags.append("🔒 одноразовое/защищённое")
+        flags.append("🔒 защищённое")
     if message.has_media_spoiler:
         flags.append("🙈 спойлер")
+    if message.forward_origin:
+        flags.append("➡️ переслано")
     return flags
 
 
@@ -97,7 +99,17 @@ def _owner_dir(base: Path, connection_id: str) -> Path:
     return base / safe
 
 
-async def download_media(bot: Bot, media: MediaRef, message_id: int, connection_id: str) -> MediaRef:
+async def download_media(
+    bot: Bot,
+    media: MediaRef,
+    message_id: int,
+    connection_id: str,
+    *,
+    max_file_mb: int = 50,
+) -> MediaRef:
+    """Скачивает медиафайл на диск. Если файл тяжелее max_file_mb — пропускает скачивание
+    (file_id сохраняется в БД, но локального файла нет). Возвращает обновлённый MediaRef.
+    """
     directory = _owner_dir(MEDIA_DIR, connection_id)
     directory.mkdir(parents=True, exist_ok=True)
     ext = _guess_extension(media)
@@ -107,18 +119,26 @@ async def download_media(bot: Bot, media: MediaRef, message_id: int, connection_
         try:
             tg_file = await bot.get_file(media.file_id)
             if not tg_file.file_path:
-                # Telegram ответил без ошибки, но без file_path — типично для
-                # одноразовых/самоуничтожающихся медиа, которые сервер не отдаёт
-                # ботам. Раньше это молча считалось "успехом" без скачивания —
-                # теперь считаем это ошибкой, логируем и пробуем ещё раз.
-                raise RuntimeError(f"get_file вернул пустой file_path для {media.kind} (message_id={message_id})")
+                # Telegram не отдаёт одноразовые/защищённые медиа
+                raise RuntimeError(
+                    f"get_file вернул пустой file_path для {media.kind} (message_id={message_id})"
+                )
+
+            # Проверяем размер ДО скачивания — экономим трафик и место
+            file_size = tg_file.file_size or 0
+            max_bytes = max_file_mb * 1024 * 1024
+            if file_size > max_bytes:
+                logger.info(
+                    "Пропущено скачивание %s (message_id=%s): размер %.1f МБ > лимита %d МБ — сохранён только file_id",
+                    media.kind, message_id, file_size / (1024 * 1024), max_file_mb,
+                )
+                return media  # local_path остаётся None
+
             await bot.download_file(tg_file.file_path, destination=destination)
             media.local_path = destination
             return media
         except Exception as exc:
             if attempt == 0:
-                # Иногда файл отдаётся не с первой попытки — пробуем ещё раз почти
-                # сразу, пока он не "протух" на серверах Telegram.
                 await asyncio.sleep(0.3)
                 continue
             logger.warning(
@@ -230,7 +250,7 @@ def directory_size_bytes(path: Path) -> int:
 def enforce_media_quota(base_dir: Path, max_total_mb: int) -> int:
     """Удаляет самые старые файлы, пока суммарный размер base_dir не впишется в лимит.
 
-    Возвращает количество удалённых файлов. Защищает 10 GB NVMe от переполнения.
+    Возвращает количество удалённых файлов.
     """
     if max_total_mb <= 0 or not base_dir.exists():
         return 0
@@ -264,6 +284,32 @@ def enforce_media_quota(base_dir: Path, max_total_mb: int) -> int:
             removed += 1
         except OSError:
             pass
+    return removed
+
+
+def enforce_media_age(base_dir: Path, max_age_hours: float) -> int:
+    """Удаляет медиафайлы, которые старше max_age_hours часов (по mtime).
+
+    Возвращает количество удалённых файлов.
+    """
+    if max_age_hours <= 0 or not base_dir.exists():
+        return 0
+
+    import time as _time
+    cutoff = _time.time() - max_age_hours * 3600
+    removed = 0
+    for root, _dirs, files in os.walk(base_dir):
+        for name in files:
+            if name == ".gitkeep":
+                continue
+            fp = Path(root) / name
+            try:
+                st = fp.stat()
+                if st.st_mtime < cutoff:
+                    fp.unlink()
+                    removed += 1
+            except OSError:
+                pass
     return removed
 
 
