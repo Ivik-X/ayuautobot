@@ -19,9 +19,9 @@ services:
           # лимит рассчитан на такой случай. Если STT выключен и сервер
           # совсем слабый (1 GB RAM), можно смело понизить до 400M.
           cpus: "1.0"
-          memory: 900M
+          memory: 1800M
         reservations:
-          memory: 128M
+          memory: 256M
     logging:
       driver: json-file
       options:

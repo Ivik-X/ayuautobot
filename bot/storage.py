@@ -27,7 +27,8 @@ class Storage:
         self._settings_cache: dict[int, OwnerSettings] = {}
         self._global_settings: GlobalSettings | None = None
         self._cache: LRUCache[tuple[str, int, int], CachedMessage] = LRUCache(
-            self.get_global().cache_max_entries
+            self.get_global().cache_max_entries,
+            on_evict=lambda _key, item: unlink_media(item.media),
         )
         self._mute: dict[tuple[str, int], MuteSession] = {}
         self._bot_deleted: set[tuple[str, int, int]] = set()

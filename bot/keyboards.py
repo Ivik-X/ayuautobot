@@ -4,10 +4,8 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from bot.settings import (
     ADMIN_BACKUP_FIELDS,
-    ADMIN_BILLING_FIELDS,
     ADMIN_CACHE_FIELDS,
     ADMIN_DATA_FIELDS,
-    ADMIN_LIMITS_FIELDS,
     COMMAND_FIELDS,
     EXTRA_FIELDS,
     MISC_FIELDS,
@@ -26,35 +24,41 @@ ADMIN_SECTION_FIELDS = {
     "backup": ADMIN_BACKUP_FIELDS,
     "cache": ADMIN_CACHE_FIELDS,
     "data": ADMIN_DATA_FIELDS,
-    "billing": ADMIN_BILLING_FIELDS,
-    "limits": ADMIN_LIMITS_FIELDS,
 }
 
 
-# --------------------------------------------------------------- user /settings
+# --------------------------------------------------------------- user /menu
 def menu_keyboard() -> InlineKeyboardMarkup:
     rows = [
-        [InlineKeyboardButton(text="🛠 Команды", callback_data="us:open:cmds")],
-        [InlineKeyboardButton(text="🧩 Доп. функции", callback_data="us:open:extra")],
-        [InlineKeyboardButton(text="🗂 Пресеты .say", callback_data="us:open:presets")],
-        [InlineKeyboardButton(text="📤 Экспорт последней истории", callback_data="us:export")],
-        [InlineKeyboardButton(text="👁‍🗨 Последние сообщения", callback_data="us:recent")],
-        [InlineKeyboardButton(text="👻 Режим призрака", callback_data="us:open:ghost")],
-        [InlineKeyboardButton(text="💫 Подписка", callback_data="sub:menu")],
-        [InlineKeyboardButton(text="⚙️ Прочее", callback_data="us:open:misc")],
+        [
+            InlineKeyboardButton(text="🛠 Команды", callback_data="us:open:cmds"),
+            InlineKeyboardButton(text="🔔 Уведомления", callback_data="us:open:notif"),
+        ],
+        [
+            InlineKeyboardButton(text="🧩 Доп. функции", callback_data="us:open:extra"),
+            InlineKeyboardButton(text="🗂 Пресеты .say", callback_data="us:open:presets"),
+        ],
+        [
+            InlineKeyboardButton(text="📤 Экспорт истории", callback_data="us:export"),
+            InlineKeyboardButton(text="👁‍🗨 Сообщения", callback_data="us:recent"),
+        ],
+        [
+            InlineKeyboardButton(text="👻 Режим призрака", callback_data="us:open:ghost"),
+            InlineKeyboardButton(text="⚙️ Параметры", callback_data="us:open:misc"),
+        ],
+        [InlineKeyboardButton(text="✖️ Закрыть меню", callback_data="us:close")],
     ]
-    rows.append([InlineKeyboardButton(text="✖️ Закрыть", callback_data="us:close")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def notifications_keyboard(settings: OwnerSettings, digest_count: int) -> InlineKeyboardMarkup:
-    """Экран /settings — только уведомления, ничего больше."""
+    """Экран /settings — только уведомления."""
     rows: list[list[InlineKeyboardButton]] = []
     for f in NOTIFICATIONS_FIELDS:
         value = getattr(settings, f.key)
         if f.kind == "bool":
-            state = "✅" if value else "⬜️"
-            rows.append([InlineKeyboardButton(text=f"{state} {f.label}", callback_data=f"us:toggle:notif:{f.key}")])
+            state = "🟢 Вкл" if value else "🔴 Выкл"
+            rows.append([InlineKeyboardButton(text=f"{f.label}: {state}", callback_data=f"us:toggle:notif:{f.key}")])
         elif f.kind == "cycle":
             label = (f.labels or {}).get(value, str(value))
             rows.append(
@@ -62,9 +66,9 @@ def notifications_keyboard(settings: OwnerSettings, digest_count: int) -> Inline
             )
     if digest_count:
         rows.append(
-            [InlineKeyboardButton(text=f"📬 Показать уведомления ({digest_count})", callback_data="us:digest")]
+            [InlineKeyboardButton(text=f"📬 Показать очередь уведомлений ({digest_count})", callback_data="us:digest")]
         )
-    rows.append([InlineKeyboardButton(text="✖️ Закрыть", callback_data="us:close")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="us:back")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -74,8 +78,8 @@ def section_keyboard(section: str, settings: OwnerSettings) -> InlineKeyboardMar
     for f in fields:
         value = getattr(settings, f.key)
         if f.kind == "bool":
-            state = "✅" if value else "⬜️"
-            text = f"{state} {f.label}"
+            state = "🟢 Вкл" if value else "🔴 Выкл"
+            text = f"{f.label}: {state}"
             cb = f"us:toggle:{section}:{f.key}"
         elif f.kind == "cycle":
             label = (f.labels or {}).get(value, str(value))
@@ -87,9 +91,9 @@ def section_keyboard(section: str, settings: OwnerSettings) -> InlineKeyboardMar
         rows.append([InlineKeyboardButton(text=text, callback_data=cb)])
 
     if section == "extra":
-        rows.append([InlineKeyboardButton(text="✏️ Текст AFK-ответа", callback_data="us:afktext")])
+        rows.append([InlineKeyboardButton(text="✏️ Изменить текст AFK-ответа", callback_data="us:afktext")])
 
-    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="us:back")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="us:back")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -190,9 +194,6 @@ def admin_main_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="📦 Бэкапы", callback_data="ad:open:backup")],
         [InlineKeyboardButton(text="📥 Кэш и медиа", callback_data="ad:open:cache")],
         [InlineKeyboardButton(text="💾 Данные", callback_data="ad:open:data")],
-        [InlineKeyboardButton(text="💫 Подписка: цена и пробный период", callback_data="ad:open:billing")],
-        [InlineKeyboardButton(text="🚦 Лимиты бесплатного тарифа", callback_data="ad:open:limits")],
-        [InlineKeyboardButton(text="🎟 Промокоды", callback_data="ad:promo:list")],
         [InlineKeyboardButton(text="👥 Пользователи", callback_data="ad:open:users")],
         [InlineKeyboardButton(text="📤 Сделать бэкап сейчас", callback_data="ad:backupnow")],
         [InlineKeyboardButton(text="📢 Рассылка всем", callback_data="ad:broadcast")],
@@ -245,6 +246,9 @@ def promo_list_keyboard(promos: list) -> InlineKeyboardMarkup:
 # -------------------------------------------------------------------- /help
 HELP_TOPICS: list[tuple[str, str]] = [
     ("cmd_spam", "💬 .spam"),
+    ("cmd_troll", "🤪 .troll"),
+    ("cmd_del", "🗑 .del"),
+    ("cmd_clone", "🎭 .clone"),
     ("cmd_mute", "🔇 .mute / .unmute"),
     ("cmd_typing", "⌨️ .typing"),
     ("cmd_mock", "🔤 .mock"),

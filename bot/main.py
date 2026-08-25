@@ -17,7 +17,7 @@ from bot.cleanup import run_cleanup_loop, startup_cleanup
 from bot.config import load_config
 from bot.database import Database
 from bot.diskguard import run_disk_guard_loop
-from bot.handlers import billing, business, service
+from bot.handlers import business, service
 from bot.handlers import ghost as ghost_handlers
 from bot.storage import Storage
 from bot.watchers import run_profile_watch_loop
@@ -32,7 +32,6 @@ logger = logging.getLogger(__name__)
 ALLOWED_UPDATES = [
     "message",
     "callback_query",
-    "pre_checkout_query",
     "business_connection",
     "business_message",
     "edited_business_message",
@@ -68,15 +67,19 @@ async def main() -> None:
     dp["stt_config"] = config.stt
 
     dp.include_router(service.router)
-    dp.include_router(billing.router)
     dp.include_router(ghost_handlers.router)
     dp.include_router(business.router)
 
+    @dp.errors()
+    async def global_error_handler(event, exception: Exception) -> bool:
+        logger.exception("Необработанная ошибка при обработке апдейта %s: %s", event, exception)
+        return True
+
     background_tasks = [
-        asyncio.create_task(run_cleanup_loop(storage)),
-        asyncio.create_task(backup_manager.run_loop()),
-        asyncio.create_task(run_profile_watch_loop(bot, storage)),
-        asyncio.create_task(run_disk_guard_loop(storage, backup_manager)),
+        asyncio.create_task(_supervised_task("cleanup_loop", run_cleanup_loop, storage)),
+        asyncio.create_task(_supervised_task("backup_loop", backup_manager.run_loop)),
+        asyncio.create_task(_supervised_task("profile_watch_loop", run_profile_watch_loop, bot, storage)),
+        asyncio.create_task(_supervised_task("disk_guard_loop", run_disk_guard_loop, storage, backup_manager)),
     ]
 
     global_settings = storage.get_global()
@@ -103,6 +106,20 @@ async def main() -> None:
                 await task
         await http_session.close()
         db.close()
+
+
+async def _supervised_task(name: str, coro_func, *args, **kwargs) -> None:
+    """Супервизор фоновых задач: если задача падает с необработанным исключением,
+    логирует ошибку и перезапускает её через небольшой интервал.
+    """
+    while True:
+        try:
+            await coro_func(*args, **kwargs)
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            logger.exception("Фоновая задача «%s» упала с ошибкой. Перезапуск через 10 сек…", name)
+            await asyncio.sleep(10)
 
 
 async def _run_webhook(bot: Bot, dp: Dispatcher, config) -> None:

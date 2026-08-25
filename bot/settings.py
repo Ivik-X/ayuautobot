@@ -147,10 +147,10 @@ class GlobalSettings:
 
     backup_enabled: bool = True
     backup_interval_hours: float = 12
-    backup_keep_local_hours: float = 6
+    backup_keep_local_hours: float = 0  # 0 = хранить локальную историю бессрочно
     backup_compress: bool = True
 
-    cache_max_entries: int = 800
+    cache_max_entries: int = 5000
     cache_cleanup_interval_min: int = 10
 
     media_max_total_mb: int = 2048
@@ -210,30 +210,12 @@ ADMIN_DATA_FIELDS: list[SettingField] = [
     SettingField("min_free_disk_gb", "💾 Мин. свободно на диске (ГБ) до аварийной очистки", "float"),
 ]
 
-ADMIN_BILLING_FIELDS: list[SettingField] = [
-    SettingField("trial_days", "🎁 Длительность пробного периода (дней)", "int"),
-    SettingField("price_stars_per_month", "⭐ Цена подписки (звёзд/месяц)", "int"),
-]
+ADMIN_BILLING_FIELDS: list[SettingField] = []
 
-ADMIN_LIMITS_FIELDS: list[SettingField] = [
-    SettingField("free_reveal_limit_month", "🔓 Раскрытий скрытых уведомлений/мес", "int"),
-    SettingField("free_presets_max", "🗂 Макс. пресетов .say", "int"),
-    SettingField("free_spam_messages_month", "💬 Лимит .spam сообщений/мес", "int"),
-    SettingField("free_mute_seconds_month", "🔇 Лимит .mute секунд/мес", "int"),
-    SettingField("free_view_enabled", "🕶 .view доступен на бесплатном", "bool"),
-    SettingField("free_afk_enabled", "💤 AFK доступен на бесплатном", "bool"),
-    SettingField("free_antisearch_enabled", "🕵️ Антипоиск доступен на бесплатном", "bool"),
-    SettingField("free_stt_enabled", "🎙 Расшифровка гс доступна на бесплатном", "bool"),
-    SettingField("free_ghost_enabled", "👻 Режим призрака доступен на бесплатном", "bool"),
-    SettingField(
-        "free_extra_features_enabled",
-        "🧩 Остальное (анон. стикеры, .watch, экспорт, последние сообщения) доступно на бесплатном",
-        "bool",
-    ),
-]
+ADMIN_LIMITS_FIELDS: list[SettingField] = []
 
 ALL_ADMIN_FIELDS = (
-    ADMIN_BACKUP_FIELDS + ADMIN_CACHE_FIELDS + ADMIN_DATA_FIELDS + ADMIN_BILLING_FIELDS + ADMIN_LIMITS_FIELDS
+    ADMIN_BACKUP_FIELDS + ADMIN_CACHE_FIELDS + ADMIN_DATA_FIELDS
 )
 
 

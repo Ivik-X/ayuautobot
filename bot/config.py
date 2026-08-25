@@ -107,9 +107,9 @@ def load_config() -> Config:
     seed = GlobalSettings(
         backup_enabled=_bool("BACKUP_ENABLED", True),
         backup_interval_hours=_float("BACKUP_INTERVAL_HOURS", 12),
-        backup_keep_local_hours=_float("BACKUP_KEEP_LOCAL_HOURS", 6),
+        backup_keep_local_hours=_float("BACKUP_KEEP_LOCAL_HOURS", 0),
         backup_compress=_bool("BACKUP_COMPRESS", True),
-        cache_max_entries=_int("CACHE_MAX_ENTRIES", 800),
+        cache_max_entries=_int("CACHE_MAX_ENTRIES", 5000),
         cache_cleanup_interval_min=_int("CACHE_CLEANUP_INTERVAL_MIN", 10),
         media_max_total_mb=_int("MEDIA_MAX_TOTAL_MB", 2048),
         min_free_disk_gb=_float("MIN_FREE_DISK_GB", 5.0),

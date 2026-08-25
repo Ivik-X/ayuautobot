@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections import OrderedDict
+from collections.abc import Callable
 from typing import Generic, TypeVar
 
 K = TypeVar("K")
@@ -16,8 +16,9 @@ class LRUCache(Generic[K, V]):
     При превышении max_size вытесняются самые старые (по времени доступа) записи.
     """
 
-    def __init__(self, max_size: int) -> None:
+    def __init__(self, max_size: int, on_evict: Callable[[K, V], None] | None = None) -> None:
         self.max_size = max(1, max_size)
+        self.on_evict = on_evict
         self._data: "OrderedDict[K, V]" = OrderedDict()
 
     def get(self, key: K) -> V | None:
@@ -30,7 +31,9 @@ class LRUCache(Generic[K, V]):
         self._data[key] = value
         self._data.move_to_end(key)
         while len(self._data) > self.max_size:
-            self._data.popitem(last=False)
+            k, v = self._data.popitem(last=False)
+            if self.on_evict is not None:
+                self.on_evict(k, v)
 
     def pop(self, key: K) -> V | None:
         return self._data.pop(key, None)
@@ -47,7 +50,12 @@ class LRUCache(Generic[K, V]):
     def set_max_size(self, max_size: int) -> None:
         self.max_size = max(1, max_size)
         while len(self._data) > self.max_size:
-            self._data.popitem(last=False)
+            k, v = self._data.popitem(last=False)
+            if self.on_evict is not None:
+                self.on_evict(k, v)
 
     def clear(self) -> None:
+        if self.on_evict is not None:
+            for k, v in self._data.items():
+                self.on_evict(k, v)
         self._data.clear()

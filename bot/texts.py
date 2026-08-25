@@ -9,24 +9,25 @@ from dotenv import load_dotenv
 load_dotenv()
 
 DEFAULT_START = (
-    "👋 Это <b>AyuAuto</b> — бот для Telegram Business.\n\n"
-    "<b>Как подключить:</b>\n"
-    "1. Откройте Telegram → Настройки → Telegram для бизнеса → Чат-боты\n"
-    "2. Нажмите «Добавить бота»\n"
-    "3. Введите: <code>{bot_username}</code>\n"
-    "4. Нажмите «Добавить» и включите права: читать, отправлять и удалять сообщения\n\n"
-    "После этого бот начнёт работать в ваших чатах.\n\n"
-    "• /menu — все функции и настройки\n"
-    "• /settings — уведомления\n"
-    "• /help — подробное описание каждой функции\n"
+    "⚡ <b>AyuAutoBot</b> — профессиональный бот для Telegram Business\n\n"
+    "<b>🚀 Как подключить бота к вашему аккаунту:</b>\n"
+    "1️⃣ Перейдите в <b>Настройки → Telegram для бизнеса → Чат-боты</b>\n"
+    "2️⃣ Нажмите <b>«Добавить бота»</b>\n"
+    "3️⃣ Введите имя бота: <code>{bot_username}</code>\n"
+    "4️⃣ Включите разрешения: <i>Чтение, Отправка и Удаление сообщений</i>\n\n"
+    "<b>📌 Быстрый доступ:</b>\n"
+    "• /menu — Главное меню и панели управления\n"
+    "• /settings — Настройка уведомлений и режимов\n"
+    "• /help — Интерактивный справочник по всем командам\n"
+    "• /ghost — Анонимный режим чтения/записи в чатах\n"
     + "{admin_hint}"
 )
 
-DEFAULT_ADMIN_HINT = "• /admin — панель администратора\n"
+DEFAULT_ADMIN_HINT = "• /admin — Панель администратора сервера\n"
 
-DEFAULT_PONG = "🏓 pong — бот на связи"
+DEFAULT_PONG = "🏓 pong — бот активен и готов к работе"
 
-HELP_INTRO = "<b>📖 Справка</b>\nВыберите тему, чтобы посмотреть подробное описание:"
+HELP_INTRO = "<b>📖 Справочный центр AyuAutoBot</b>\n\nВыберите нужный раздел ниже для просмотра подробных инструкций и примеров использования:"
 
 HELP_TOPIC_BODIES: dict[str, str] = {
     "cmd_spam": (
@@ -133,13 +134,42 @@ HELP_TOPIC_BODIES: dict[str, str] = {
         "удалениях, которые сделал сам бот (например, при .mute или .view) — по умолчанию они скрыты, "
         "чтобы не засорять чат с ботом."
     ),
+    "cmd_troll": (
+        "<b>🤪 .troll</b>\n\n"
+        "<code>.troll 5</code> — отправляет 5 случайных тролль-фраз из словаря с небольшим интервалом.\n"
+        "Сама команда мгновенно удаляется из чата."
+    ),
+    "cmd_del": (
+        "<b>🗑 .del</b>\n\n"
+        "<code>.del 5</code> — удаляет последние 5 сообщений в этом чате (как ваши, так и собеседника)."
+    ),
+    "cmd_clone": (
+        "<b>🎭 .clone</b>\n\n"
+        "<code>.clone @username</code> — покажет данные целевого профиля и позволит скопировать их.\n"
+        "<code>.clone restore</code> — восстановит ваш исходный профиль из резервной копии."
+    ),
 }
+
+DEFAULT_TROLL_PHRASES = [
+    "ебланище",
+    "дебил",
+    "твою мамку по кругу куча папуасов пускали",
+    "дура тупая",
+    "соси писюн",
+    "ты че сука",
+    "пасть свою завали",
+    "плешивое чмо",
+    "охуел",
+    "хуесосище страшное",
+    "чудо аборта"
+]
 
 
 @dataclass(frozen=True, slots=True)
 class Texts:
     start: str
     pong: str
+    troll_phrases: list[str]
 
 
 def _read_text(env_key: str, file_key: str, default: str) -> str:
@@ -157,4 +187,17 @@ def _read_text(env_key: str, file_key: str, default: str) -> str:
 def load_texts() -> Texts:
     start_text = _read_text("TEXT_START", "TEXT_START_FILE", DEFAULT_START)
     pong_text = _read_text("TEXT_PONG", "TEXT_PONG_FILE", DEFAULT_PONG)
-    return Texts(start=start_text, pong=pong_text)
+
+    troll_raw = os.getenv("TROLL_PHRASES", "").strip()
+    troll_file = os.getenv("TROLL_PHRASES_FILE", "").strip()
+    phrases = []
+    if troll_file and Path(troll_file).is_file():
+        content = Path(troll_file).read_text(encoding="utf-8")
+        phrases = [line.strip() for line in content.splitlines() if line.strip()]
+    elif troll_raw:
+        phrases = [p.strip() for p in troll_raw.split("|") if p.strip()]
+
+    if not phrases:
+        phrases = list(DEFAULT_TROLL_PHRASES)
+
+    return Texts(start=start_text, pong=pong_text, troll_phrases=phrases)

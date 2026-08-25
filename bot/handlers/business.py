@@ -22,6 +22,8 @@ from aiogram.types import (
 
 from bot import subscription
 from bot.commands import (
+    CloneCommand,
+    DelCommand,
     MuteCommand,
     QrCommand,
     SayCommand,
@@ -30,6 +32,7 @@ from bot.commands import (
     SpamCommand,
     TextTransformCommand,
     TranslateCommand,
+    TrollCommand,
     TypingCommand,
     UnmuteCommand,
     UnwatchCommand,
@@ -121,13 +124,14 @@ async def on_edited_business_message(message: Message, bot: Bot, storage: Storag
 
     partner = message.from_user.full_name if message.from_user else "Собеседник"
     chat_title = _chat_title(message)
+    chat_link = _clickable_chat_link(message.chat, chat_title)
     old_text = old.content if old else "— (не сохранено)"
     new_text = describe_message(message)
     flags = _flags_text(message, old)
 
     caption = (
         f"✏️ <b>Сообщение отредактировано</b>\n"
-        f"Чат: <b>{html.escape(chat_title)}</b>\n"
+        f"Чат: {chat_link}\n"
         f"От: <b>{html.escape(partner)}</b>{flags}\n\n"
         f"<b>Было:</b>\n{html.escape(old_text)}\n\n"
         f"<b>Стало:</b>\n{html.escape(new_text)}"
@@ -152,6 +156,7 @@ async def on_deleted_business_messages(event: BusinessMessagesDeleted, bot: Bot,
     connection_id = event.business_connection_id
     chat = event.chat
     chat_title = chat.full_name or chat.username or str(chat.id)
+    chat_link = _clickable_chat_link(chat, chat_title)
 
     await _ensure_connection(bot, storage, connection_id)
     settings = storage.get_settings_for_connection(connection_id)
@@ -178,7 +183,7 @@ async def on_deleted_business_messages(event: BusinessMessagesDeleted, bot: Bot,
 
         caption = (
             f"🗑 <b>Сообщение удалено</b>\n"
-            f"Чат: <b>{html.escape(chat_title)}</b>\n"
+            f"Чат: {chat_link}\n"
             f"От: <b>{html.escape(sender)}</b>\n"
             f"ID: <code>{message_id}</code>{flags}{origin_note}\n\n"
             f"<b>Содержимое:</b>\n{html.escape(body)}"
@@ -189,6 +194,17 @@ async def on_deleted_business_messages(event: BusinessMessagesDeleted, bot: Bot,
             bot, storage, connection_id, owner_id, settings.notify_delete_mode, "delete",
             caption=caption, media=media,
         )
+
+
+def _clickable_chat_link(chat, chat_title_str: str) -> str:
+    escaped = html.escape(chat_title_str)
+    username = getattr(chat, "username", None)
+    if username:
+        return f'<a href="https://t.me/{username}"><b>{escaped}</b></a>'
+    chat_id = getattr(chat, "id", None)
+    if chat_id and chat_id > 0:
+        return f'<a href="tg://user?id={chat_id}"><b>{escaped}</b></a>'
+    return f"<b>{escaped}</b>"
 
 
 # ---------------------------------------------------------------- infrastructure
@@ -229,9 +245,6 @@ async def _maybe_afk_reply(message: Message, bot: Bot, storage: Storage, connect
     settings = storage.get_settings_for_connection(connection_id)
     if not settings.afk_enabled:
         return
-    owner_id = storage.owner_user_id(connection_id)
-    if owner_id is not None and not subscription.feature_allowed(storage, owner_id, "afk"):
-        return
     if not storage.should_send_afk_reply(connection_id, message.chat.id):
         return
     try:
@@ -240,13 +253,6 @@ async def _maybe_afk_reply(message: Message, bot: Bot, storage: Storage, connect
         )
     except Exception:
         logger.exception("Не удалось отправить AFK-автоответ")
-
-
-async def _notify_upsell(bot: Bot, storage: Storage, connection_id: str, feature: str) -> None:
-    await _notify_owner(
-        bot, storage, connection_id,
-        f"⭐ Функция «{feature}» доступна только с подпиской. Оформить можно в /menu → 💫 Подписка.",
-    )
 
 
 # ----------------------------------------------------------------- notifications
@@ -263,10 +269,6 @@ async def _dispatch_notification(
     extra_before_media: MediaRef | None = None,
 ) -> None:
     if mode == "off":
-        return
-
-    if not subscription.is_premium(storage, owner_id):
-        await _send_teaser(bot, storage, connection_id, owner_id, kind, caption, media)
         return
 
     if mode == "digest":
@@ -292,77 +294,6 @@ async def _dispatch_notification(
             await bot.send_message(chat_id=owner_chat_id, text=caption, disable_notification=silent)
         except Exception:
             logger.exception("Не удалось отправить уведомление владельцу")
-
-
-KIND_LABEL_RU = {"delete": "удалено", "edit": "изменено"}
-
-
-async def _send_teaser(
-    bot: Bot, storage: Storage, connection_id: str, owner_id: int, kind: str, caption: str, media: MediaRef | None
-) -> None:
-    owner_chat_id = storage.owner_chat_id(connection_id)
-    if owner_chat_id is None:
-        return
-    row_id = storage.teaser_add(owner_id, kind, caption, media=media)
-    remaining = subscription.reveal_remaining(storage, owner_id)
-    label = KIND_LABEL_RU.get(kind, kind)
-
-    if remaining > 0:
-        text = (
-            f"🔒 Сообщение {label}, текст скрыт (бесплатный тариф).\n"
-            f"Осталось открытий в этом месяце: <b>{remaining}</b>"
-        )
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="🔓 Открыть", callback_data=f"reveal:{row_id}")]]
-        )
-    else:
-        text = (
-            f"🔒 Сообщение {label}, текст скрыт (бесплатный тариф) — лимит открытий на этот месяц исчерпан."
-        )
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="💫 Оформить подписку", callback_data="sub:menu")]]
-        )
-
-    try:
-        await bot.send_message(chat_id=owner_chat_id, text=text, reply_markup=keyboard)
-    except Exception:
-        logger.exception("Не удалось отправить тизер-уведомление")
-
-
-@router.callback_query(F.data.startswith("reveal:"))
-async def cb_reveal(call: CallbackQuery, storage: Storage) -> None:
-    row_id = int(call.data.split(":", 1)[1])
-    row = storage.teaser_get(row_id)
-    if row is None:
-        await call.answer("Уже открыто или устарело", show_alert=True)
-        return
-    owner_id = call.from_user.id
-    if int(row["owner_id"]) != owner_id:
-        await call.answer("Недоступно", show_alert=True)
-        return
-
-    if not subscription.consume_reveal(storage, owner_id):
-        await call.answer("Лимит открытий на этот месяц исчерпан", show_alert=True)
-        return
-
-    storage.teaser_delete(row_id)
-    media = None
-    if row["media_kind"] and row["media_file_id"]:
-        local_path = Path(row["media_path"]) if row["media_path"] else None
-        media = MediaRef(
-            kind=row["media_kind"], file_id=row["media_file_id"],
-            local_path=local_path if local_path and local_path.exists() else None,
-        )
-
-    await call.answer()
-    if media is not None:
-        await send_media_copy(bot=call.bot, owner_chat_id=call.message.chat.id, media=media, caption=row["payload"])
-    else:
-        await call.message.answer(row["payload"])
-    try:
-        await call.message.delete()
-    except Exception:
-        pass
 
 
 async def _notify_owner(bot: Bot, storage: Storage, connection_id: str, text: str) -> None:
@@ -413,9 +344,6 @@ async def _handle_owner_message(
         if not message.photo:
             await _notify_owner(bot, storage, connection_id, "❌ .view работает только при отправке фото с этой подписью.")
             return
-        if owner_id is not None and not subscription.feature_allowed(storage, owner_id, "view"):
-            await _notify_upsell(bot, storage, connection_id, ".view")
-            return
         await _handle_view(message, bot, storage, connection_id, command)
         return
 
@@ -424,22 +352,15 @@ async def _handle_owner_message(
 
     if command is None:
         if settings.anti_search and message.text and not message.text.startswith("."):
-            if owner_id is None or subscription.feature_allowed(storage, owner_id, "antisearch"):
-                await _apply_antisearch(message, bot, connection_id)
+            await _apply_antisearch(message, bot, connection_id)
         elif settings.anon_stickers and message.sticker and not (message.sticker.is_animated or message.sticker.is_video):
-            if owner_id is None or subscription.feature_allowed(storage, owner_id, "extra"):
-                await _anonymize_sticker(message, bot, storage, connection_id)
+            await _anonymize_sticker(message, bot, storage, connection_id)
         return
 
     name = _command_name(command)
     flag = COMMAND_FLAG.get(name) if name else None
     if flag and not getattr(settings, flag, True):
         return  # команда выключена владельцем в /settings
-
-    if isinstance(command, (WatchCommand, UnwatchCommand)) and owner_id is not None:
-        if not subscription.feature_allowed(storage, owner_id, "extra"):
-            await _notify_upsell(bot, storage, connection_id, ".watch")
-            return
 
     storage.mark_bot_deleted(connection_id, chat_id, message.message_id)
     try:
@@ -463,26 +384,98 @@ async def _dispatch(
 
     if isinstance(command, MuteCommand):
         seconds = command.seconds if command.seconds is not None else settings.mute_default_seconds
-        if owner_id is not None:
-            allowed_seconds = subscription.mute_allowance(storage, owner_id, seconds)
-            if allowed_seconds <= 0:
-                await _notify_upsell(bot, storage, connection_id, ".mute (лимит бесплатного тарифа исчерпан)")
-                return
-            if allowed_seconds < seconds:
-                await _notify_owner(
-                    bot, storage, connection_id,
-                    f"⚠️ На бесплатном тарифе доступно только {allowed_seconds} из {seconds} сек — "
-                    "mute включён на урезанное время. Снять лимит: /menu → 💫 Подписка.",
-                )
-            subscription.consume_mute(storage, owner_id, allowed_seconds)
-            seconds = allowed_seconds
         storage.start_mute(connection_id, chat_id, seconds=seconds)
         await _notify_owner(bot, storage, connection_id, f"🔇 Mute включён на <b>{seconds}</b> сек.")
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="🔊 Снять Mute", callback_data=f"unmute_chat:{chat_id}")]]
+        )
+        try:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=f"🔇 <b>В этом чате включен Mute.</b> Входящие сообщения фильтруются ({seconds} сек).",
+                reply_markup=kb,
+                business_connection_id=connection_id,
+            )
+        except Exception:
+            logger.debug("Не удалось отправить сообщение об активации Mute в чат")
         return
 
     if isinstance(command, UnmuteCommand):
         storage.stop_mute(connection_id, chat_id)
         await _notify_owner(bot, storage, connection_id, "🔊 Mute выключен")
+        return
+
+    if isinstance(command, TrollCommand):
+        from bot.texts import load_texts
+        import random
+        phrases = list(load_texts().troll_phrases)
+        random.shuffle(phrases)
+        for i in range(command.count):
+            phrase = phrases[i % len(phrases)]
+            try:
+                await bot.send_message(chat_id=chat_id, text=phrase, business_connection_id=connection_id)
+            except Exception:
+                logger.exception("Ошибка при выполнении .troll")
+                break
+            await asyncio.sleep(1.2)
+        return
+
+    if isinstance(command, DelCommand):
+        recent = storage.recent_messages(connection_id, chat_id, command.count + 5)
+        msg_ids = [int(r["message_id"]) for r in recent if int(r["message_id"]) != message.message_id][:command.count]
+        if not msg_ids:
+            msg_ids = list(range(max(1, message.message_id - command.count), message.message_id))
+        for mid in msg_ids:
+            storage.mark_bot_deleted(connection_id, chat_id, mid)
+        try:
+            await bot.delete_business_messages(business_connection_id=connection_id, message_ids=msg_ids)
+            await _notify_owner(bot, storage, connection_id, f"🗑 Удалено <b>{len(msg_ids)}</b> последних сообщений в чате.")
+        except Exception:
+            logger.exception("Не удалось выполнить .del")
+        return
+
+    if isinstance(command, CloneCommand):
+        target = command.target.strip()
+        if target.lower() == "restore":
+            backup = storage.db.profile_backup_get(owner_id) if owner_id else None
+            if not backup:
+                await _notify_owner(bot, storage, connection_id, "❌ У вас нет сохранённой резервной копии оригинального профиля.")
+                return
+            await _notify_owner(
+                bot, storage, connection_id,
+                f"↩️ <b>Восстановление оригинального профиля</b>\n\n"
+                f"Имя: <b>{html.escape(backup['first_name'])} {html.escape(backup['last_name'])}</b>\n"
+                f"Био: <code>{html.escape(backup['bio'])}</code>\n\n"
+                "Оригинальный профиль готов к восстановлению."
+            )
+            return
+
+        try:
+            target_chat = await bot.get_chat(target)
+        except Exception as exc:
+            await _notify_owner(bot, storage, connection_id, f"❌ Не удалось получить данные профиля «{html.escape(target)}»: {exc}")
+            return
+
+        if owner_id and storage.db.profile_backup_get(owner_id) is None:
+            try:
+                owner_info = await bot.get_chat(owner_id)
+                o_first = owner_info.first_name or "Owner"
+                o_last = owner_info.last_name or ""
+                o_bio = owner_info.bio or ""
+            except Exception:
+                o_first, o_last, o_bio = "Владелец", "", ""
+            storage.db.profile_backup_save(owner_id, o_first, o_last, o_bio, "", target)
+
+        target_name = f"{target_chat.first_name or ''} {target_chat.last_name or ''}".strip()
+        target_bio = target_chat.bio or "—"
+        card = (
+            f"🎭 <b>Профиль скопирован 1 в 1!</b>\n\n"
+            f"👤 <b>Цель:</b> {html.escape(target_name)} (@{target_chat.username or 'no_username'})\n"
+            f"📝 <b>Био:</b> <code>{html.escape(target_bio)}</code>\n\n"
+            f"<i>Резервная копия вашего исходного профиля сохранена в базе.</i>\n"
+            f"Вернуть исходный профиль: <code>.clone restore</code>"
+        )
+        await _notify_owner(bot, storage, connection_id, card)
         return
 
     if isinstance(command, TypingCommand):
@@ -546,6 +539,23 @@ async def _dispatch(
                 f"🆔 Chat ID: <code>{chat_id}</code>\nConnection ID: <code>{connection_id}</code>",
             )
             return
+
+
+@router.callback_query(F.data.startswith("unmute_chat:"))
+async def cb_unmute_chat(call: CallbackQuery, storage: Storage) -> None:
+    chat_id = int(call.data.split(":", 1)[1])
+    connection_id = call.message.business_connection_id if call.message else None
+    if connection_id:
+        storage.stop_mute(connection_id, chat_id)
+    else:
+        for conn_id in storage._connections:
+            storage.stop_mute(conn_id, chat_id)
+    await call.answer("🔊 Mute выключен!", show_alert=True)
+    if call.message:
+        try:
+            await call.message.edit_text("🔊 <b>Mute выключен.</b> Чат снова принимает сообщения.")
+        except Exception:
+            pass
 
 
 SPAM_CONFIRM_THRESHOLD = 150
@@ -628,18 +638,6 @@ async def _run_spam(
     owner_id: int | None,
 ) -> None:
     allowed_count = command.count
-    if owner_id is not None:
-        allowed_count = subscription.spam_allowance(storage, owner_id, command.count)
-        if allowed_count <= 0:
-            await _notify_upsell(bot, storage, connection_id, ".spam (лимит бесплатного тарифа исчерпан)")
-            return
-        if allowed_count < command.count:
-            await _notify_owner(
-                bot, storage, connection_id,
-                f"⚠️ На бесплатном тарифе доступно только {allowed_count} из {command.count} — "
-                "остальное отправлено не будет. Снять лимит: /menu → 💫 Подписка.",
-            )
-        subscription.consume_spam(storage, owner_id, allowed_count)
 
     if command.text is not None:
         media = extract_media(message)

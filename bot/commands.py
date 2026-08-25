@@ -69,6 +69,21 @@ class UnwatchCommand:
 
 
 @dataclass(frozen=True, slots=True)
+class TrollCommand:
+    count: int
+
+
+@dataclass(frozen=True, slots=True)
+class DelCommand:
+    count: int
+
+
+@dataclass(frozen=True, slots=True)
+class CloneCommand:
+    target: str
+
+
+@dataclass(frozen=True, slots=True)
 class SimpleCommand:
     name: str  # id | ping
 
@@ -86,10 +101,16 @@ Command = (
     | ViewCommand
     | WatchCommand
     | UnwatchCommand
+    | TrollCommand
+    | DelCommand
+    | CloneCommand
     | SimpleCommand
 )
 
 _SPAM_RE = re.compile(r"^\.spam\s+(\d+)(?:\s+(.+))?$", re.DOTALL | re.IGNORECASE)
+_TROLL_RE = re.compile(r"^\.troll(?:\s+(\d+))?$", re.IGNORECASE)
+_DEL_RE = re.compile(r"^\.del\s+(\d+)$", re.IGNORECASE)
+_CLONE_RE = re.compile(r"^\.clone\s+(\S+)$", re.IGNORECASE)
 _MUTE_RE = re.compile(r"^\.mute(?:\s+(\d+))?$", re.IGNORECASE)
 _UNMUTE_RE = re.compile(r"^\.unmute$", re.IGNORECASE)
 _TYPING_RE = re.compile(r"^\.typing\s+(\d+)$", re.IGNORECASE)
@@ -130,6 +151,19 @@ def parse_command(text: str | None) -> Command | None:
                 return None
             return MuteCommand(seconds=seconds)
         return MuteCommand(seconds=None)
+
+    if match := _TROLL_RE.match(text):
+        count = int(match.group(1)) if match.group(1) else 5
+        return TrollCommand(count=min(max(1, count), 50))
+
+    if match := _DEL_RE.match(text):
+        count = int(match.group(1))
+        if count <= 0:
+            return None
+        return DelCommand(count=min(count, 100))
+
+    if match := _CLONE_RE.match(text):
+        return CloneCommand(target=match.group(1).strip())
 
     if match := _TYPING_RE.match(text):
         seconds = min(int(match.group(1)), 30)

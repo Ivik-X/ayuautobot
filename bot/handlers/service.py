@@ -32,7 +32,6 @@ from bot.keyboards import (
     notifications_keyboard,
     preset_creation_keyboard,
     presets_keyboard,
-    promo_list_keyboard,
     recent_count_keyboard,
     section_keyboard,
 )
@@ -55,8 +54,6 @@ ADMIN_SECTION_TITLES = {
     "backup": "📦 Бэкапы",
     "cache": "📥 Кэш и медиа",
     "data": "💾 Данные",
-    "billing": "💫 Подписка: цена и пробный период",
-    "limits": "🚦 Лимиты бесплатного тарифа",
 }
 
 # user_id -> состояние текущего диалогового шага (ввод текста/сбор пресета)
@@ -120,10 +117,19 @@ async def cmd_settings(message: Message, storage: Storage) -> None:
 async def cmd_menu(message: Message, storage: Storage) -> None:
     owner_id = message.from_user.id
     storage.db.ensure_owner(owner_id, is_admin=storage.is_admin(owner_id))
-    await message.answer(
-        "<b>📋 Меню</b>\nВыберите раздел:",
-        reply_markup=menu_keyboard(),
+    connections = storage.connections_for_owner(owner_id)
+    conn_count = len(connections)
+    cached_cnt = storage.cached_count()
+    status_icon = "🟢" if conn_count else "🟡"
+    status_text = f"Активных аккаунтов: <b>{conn_count}</b>" if conn_count else "<i>Чат-бот пока не привязан</i>"
+
+    text = (
+        f"{status_icon} <b>Панель управления AyuAutoBot</b>\n\n"
+        f"🔗 <b>Статус:</b> {status_text}\n"
+        f"📥 <b>Кэш сообщений:</b> <b>{cached_cnt}</b> элементов\n\n"
+        "Выберите необходимый раздел ниже:"
     )
+    await message.answer(text, reply_markup=menu_keyboard())
 
 
 @router.callback_query(F.data == "us:close")
@@ -135,9 +141,20 @@ async def us_close(call: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "us:back")
 async def us_back(call: CallbackQuery, storage: Storage) -> None:
-    await call.message.edit_text(
-        "<b>📋 Меню</b>\nВыберите раздел:", reply_markup=menu_keyboard()
+    owner_id = call.from_user.id
+    connections = storage.connections_for_owner(owner_id)
+    conn_count = len(connections)
+    cached_cnt = storage.cached_count()
+    status_icon = "🟢" if conn_count else "🟡"
+    status_text = f"Активных аккаунтов: <b>{conn_count}</b>" if conn_count else "<i>Чат-бот пока не привязан</i>"
+
+    text = (
+        f"{status_icon} <b>Панель управления AyuAutoBot</b>\n\n"
+        f"🔗 <b>Статус:</b> {status_text}\n"
+        f"📥 <b>Кэш сообщений:</b> <b>{cached_cnt}</b> элементов\n\n"
+        "Выберите необходимый раздел ниже:"
     )
+    await call.message.edit_text(text, reply_markup=menu_keyboard())
     await call.answer()
 
 
@@ -151,10 +168,20 @@ async def us_open(call: CallbackQuery, storage: Storage) -> None:
     section = call.data.split(":", 2)[2]
     owner_id = call.from_user.id
 
+    if section == "notif":
+        settings = storage.get_settings(owner_id)
+        digest_count = storage.queue_count(owner_id)
+        await call.message.edit_text(
+            "<b>🔔 Настройки уведомлений</b>\nНастройте получение сообщений об удалениях и редактированиях:",
+            reply_markup=notifications_keyboard(settings, digest_count),
+        )
+        await call.answer()
+        return
+
     if section == "presets":
         names = storage.preset_list(owner_id)
-        text = "<b>🗂 Пресеты .say</b>\n" + (
-            "Ваши пресеты:" if names else "У вас пока нет пресетов."
+        text = "<b>🗂 Пресеты быстрых ответов (.say)</b>\n\n" + (
+            "Список созданных пресетов:" if names else "У вас пока нет сохранённых пресетов."
         )
         await call.message.edit_text(text, reply_markup=presets_keyboard(names))
         await call.answer()
@@ -200,14 +227,14 @@ async def us_edit(call: CallbackQuery) -> None:
     if field is None:
         await call.answer("Неизвестная настройка", show_alert=True)
         return
-    _pending[call.from_user.id] = {"kind": "edit_user", "section": section, "key": key}
+    _pending[call.from_user.id] = {"kind": "edit_user", "section": section, "key": key, "created_at": time.time()}
     await call.answer()
     await call.message.answer(f"Введите новое значение для «{field.label}» одним сообщением:")
 
 
 @router.callback_query(F.data == "us:afktext")
 async def us_afktext(call: CallbackQuery) -> None:
-    _pending[call.from_user.id] = {"kind": "afk_text"}
+    _pending[call.from_user.id] = {"kind": "afk_text", "created_at": time.time()}
     await call.answer()
     await call.message.answer("Отправьте текст автоответа для AFK-режима одним сообщением:")
 
@@ -244,9 +271,6 @@ async def us_digest(call: CallbackQuery, storage: Storage) -> None:
 @router.callback_query(F.data == "us:export")
 async def us_export(call: CallbackQuery, storage: Storage) -> None:
     owner_id = call.from_user.id
-    if not subscription.feature_allowed(storage, owner_id, "extra"):
-        await call.answer("⭐ Экспорт доступен только с подпиской. /menu → 💫 Подписка.", show_alert=True)
-        return
     connection_ids = storage.connections_for_owner(owner_id)
     chats: list[tuple[int, str, int]] = []
     for connection_id in connection_ids:
@@ -325,9 +349,6 @@ def _safe_filename(name: str) -> str:
 @router.callback_query(F.data == "us:recent")
 async def us_recent(call: CallbackQuery, storage: Storage) -> None:
     owner_id = call.from_user.id
-    if not subscription.feature_allowed(storage, owner_id, "extra"):
-        await call.answer("⭐ Доступно только с подпиской. /menu → 💫 Подписка.", show_alert=True)
-        return
     connection_ids = storage.connections_for_owner(owner_id)
     chats: list[tuple[int, str, int]] = []
     for connection_id in connection_ids:
@@ -436,10 +457,6 @@ def _ghost_settings_kb(storage: Storage, owner_id: int):
 @router.callback_query(F.data == "gs:toggle")
 async def gs_toggle(call: CallbackQuery, storage: Storage) -> None:
     owner_id = call.from_user.id
-    current = storage.get_settings(owner_id).ghost_mode_enabled
-    if not current and not subscription.feature_allowed(storage, owner_id, "ghost"):
-        await call.answer("⭐ Режим призрака доступен только с подпиской. /menu → 💫 Подписка.", show_alert=True)
-        return
     storage.toggle_setting(owner_id, "ghost_mode_enabled")
     await call.message.edit_text(_ghost_settings_text(storage, owner_id), reply_markup=_ghost_settings_kb(storage, owner_id))
     await call.answer("Сохранено")
@@ -488,12 +505,7 @@ async def us_preset_del(call: CallbackQuery, storage: Storage) -> None:
 @router.callback_query(F.data == "us:preset:add")
 async def us_preset_add(call: CallbackQuery, storage: Storage) -> None:
     owner_id = call.from_user.id
-    current_count = len(storage.preset_list(owner_id))
-    if not subscription.presets_allowed(storage, owner_id, current_count):
-        limit = storage.get_global().free_presets_max
-        await call.answer(f"⭐ На бесплатном тарифе доступно максимум {limit} пресетов. /menu → 💫 Подписка.", show_alert=True)
-        return
-    _pending[owner_id] = {"kind": "preset_name"}
+    _pending[owner_id] = {"kind": "preset_name", "created_at": time.time()}
     await call.answer()
     await call.message.answer("Введите имя нового пресета (одно слово, буквы/цифры/подчёркивание):")
 
@@ -611,7 +623,7 @@ async def ad_edit(call: CallbackQuery, storage: Storage) -> None:
     if field is None:
         await call.answer("Неизвестная настройка", show_alert=True)
         return
-    _pending[call.from_user.id] = {"kind": "edit_admin", "section": section, "key": key}
+    _pending[call.from_user.id] = {"kind": "edit_admin", "section": section, "key": key, "created_at": time.time()}
     await call.answer()
     await call.message.answer(f"Введите новое значение для «{field.label}» одним сообщением:")
 
@@ -623,7 +635,7 @@ async def ad_backupnow(call: CallbackQuery, storage: Storage, backup: BackupMana
         return
     await call.answer("Делаю бэкап…")
     ok = await backup.backup_now()
-    await call.message.answer("✅ Бэкап отправлен, локальная история схлопнута." if ok else "❌ Не удалось выполнить бэкап (см. логи).")
+    await call.message.answer("✅ Бэкап отправлен." if ok else "❌ Не удалось выполнить бэкап (см. логи).")
 
 
 @router.callback_query(F.data == "ad:broadcast")
@@ -631,7 +643,7 @@ async def ad_broadcast(call: CallbackQuery, storage: Storage) -> None:
     if not storage.is_admin(call.from_user.id):
         await call.answer()
         return
-    _pending[call.from_user.id] = {"kind": "broadcast"}
+    _pending[call.from_user.id] = {"kind": "broadcast", "created_at": time.time()}
     await call.answer()
     await call.message.answer("Отправьте текст рассылки одним сообщением — уйдёт всем подключённым владельцам:")
 
@@ -691,12 +703,18 @@ def _not_a_command(message: Message) -> bool:
 
 @router.message(F.chat.type == "private", _not_a_command)
 async def private_input(message: Message, storage: Storage, stt_config: SttConfig) -> None:
+    if message.from_user is None:
+        return
     user_id = message.from_user.id
+    now = time.time()
     state = _pending.get(user_id)
 
+    # Автоочистка устаревших состояний диалога (> 10 минут)
+    if state and now - state.get("created_at", now) > 600:
+        _pending.pop(user_id, None)
+        state = None
+
     if state is None:
-        if await billing_handlers.handle_promo_input(message, storage):
-            return
         if await ghost_handlers.handle_search_input(message, storage):
             return
         if await ghost_handlers.handle_session_relay(message, storage):
@@ -760,7 +778,7 @@ async def private_input(message: Message, storage: Storage, stt_config: SttConfi
         if not name or not name.replace("_", "").isalnum():
             await message.answer("❌ Имя должно быть одним словом: буквы/цифры/подчёркивание. Попробуйте снова:")
             return
-        _pending[user_id] = {"kind": "preset_items", "name": name, "items": []}
+        _pending[user_id] = {"kind": "preset_items", "name": name, "items": [], "created_at": time.time()}
         await message.answer(
             f"Пресет «{name}»: отправьте одно или несколько сообщений (текст, голосовые, кружки, фото и т.д.) — "
             "они будут отправляться по очереди при вызове <code>.say " + name + "</code>. "
@@ -824,11 +842,8 @@ async def private_input(message: Message, storage: Storage, stt_config: SttConfi
 
 
 async def _handle_stt(message: Message, storage: Storage, stt_config: SttConfig) -> None:
-    if not stt_config.enabled:
-        return  # STT выключен (STT_ENABLED=false в .env) — молчим, чтобы не спамить объяснением на каждое гс
-    if not subscription.feature_allowed(storage, message.from_user.id, "stt"):
-        await message.answer("⭐ Расшифровка голосовых доступна только с подпиской. /menu → 💫 Подписка.")
-        return
+    if not stt_config.enabled or message.from_user is None:
+        return  # STT выключен (STT_ENABLED=false в .env) — молчим
     media = extract_media(message)
     if media is None:
         return

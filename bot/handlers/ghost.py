@@ -79,14 +79,13 @@ async def _send_picker(message: Message, storage: Storage, owner_id: int, connec
     enriched = [(cid, title, total, unread, cid in pinned_ids) for cid, title, total, unread in chats]
     enriched.sort(key=lambda item: (not item[4], -item[2]))
 
-    if not enriched:
-        await message.answer(
-            "Пока нет ни одного чата с сохранённой историей — просто дождитесь новых сообщений, "
-            "бот сам начнёт копить историю для режима призрака."
-        )
-        return
-
-    await message.answer("<b>👻 Выберите чат</b>", reply_markup=ghost_picker_keyboard(enriched))
+    header = (
+        "<b>👻 Режим Призрака (Stealth Mode)</b>\n\n"
+        "• <b>Анонимное чтение:</b> Сообщения читаются из локальной памяти бота. Собеседник не видит галочек прочтения.\n"
+        "• <b>Скрытая отправка:</b> Все ответы уходят через Bot API. Ваш аккаунт <b>НЕ заходит в сеть (Online)</b>.\n\n"
+        "Выберите чат для просмотра или ответа:"
+    )
+    await message.answer(header, reply_markup=ghost_picker_keyboard(enriched))
 
 
 @router.callback_query(F.data == "gh:list")

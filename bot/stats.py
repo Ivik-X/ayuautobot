@@ -102,6 +102,5 @@ def format_admin_overview(
         f"🖼 Медиа на диске: <b>{media_mb:.1f} МБ</b>\n\n"
         f"📦 Автобэкап: <b>{'вкл' if backup_enabled else 'выкл'}</b> "
         f"(каждые {backup_interval_hours:g} ч)\n"
-        f"🕓 Последний бэкап: {last_backup}\n\n"
-        f"⭐ Всего получено звёзд: <b>{total_stars}</b>"
+        f"🕓 Последний бэкап: {last_backup}"
     )

@@ -34,6 +34,9 @@ class Database:
             PRAGMA journal_mode=WAL;
             PRAGMA synchronous=NORMAL;
             PRAGMA temp_store=MEMORY;
+            PRAGMA busy_timeout=10000;
+            PRAGMA mmap_size=268435456;
+            PRAGMA cache_size=-16000;
 
             CREATE TABLE IF NOT EXISTS owners (
                 owner_id      INTEGER PRIMARY KEY,
@@ -88,6 +91,16 @@ class Database:
                 items      TEXT NOT NULL DEFAULT '[]',
                 updated_at REAL NOT NULL,
                 PRIMARY KEY (owner_id, name)
+            );
+
+            CREATE TABLE IF NOT EXISTS profile_backups (
+                owner_id      INTEGER PRIMARY KEY,
+                first_name    TEXT NOT NULL DEFAULT '',
+                last_name     TEXT NOT NULL DEFAULT '',
+                bio           TEXT NOT NULL DEFAULT '',
+                photo_id      TEXT NOT NULL DEFAULT '',
+                cloned_target TEXT NOT NULL DEFAULT '',
+                updated_at    REAL NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS notifications_queue (
@@ -936,6 +949,8 @@ class Database:
         return dest_path
 
     def trim_after_backup(self, keep_hours: float) -> int:
+        if keep_hours <= 0:
+            return 0
         removed = self.purge_older_than(keep_hours)
         self.vacuum()
         return removed
@@ -951,6 +966,31 @@ class Database:
             self._conn.execute("VACUUM")
         except sqlite3.OperationalError:
             logger.warning("VACUUM пропущен (БД занята)")
+
+    # ----------------------------------------------------------- profile_backups
+    def profile_backup_save(
+        self, owner_id: int, first_name: str, last_name: str, bio: str, photo_id: str, cloned_target: str
+    ) -> None:
+        now = time.time()
+        self._conn.execute(
+            """
+            INSERT OR REPLACE INTO profile_backups
+            (owner_id, first_name, last_name, bio, photo_id, cloned_target, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (owner_id, first_name, last_name, bio, photo_id, cloned_target, now),
+        )
+        self._conn.commit()
+
+    def profile_backup_get(self, owner_id: int) -> sqlite3.Row | None:
+        cur = self._conn.execute(
+            "SELECT * FROM profile_backups WHERE owner_id = ?", (owner_id,)
+        )
+        return cur.fetchone()
+
+    def profile_backup_delete(self, owner_id: int) -> None:
+        self._conn.execute("DELETE FROM profile_backups WHERE owner_id = ?", (owner_id,))
+        self._conn.commit()
 
 
 def _unlink_path(path_str: str) -> None:
