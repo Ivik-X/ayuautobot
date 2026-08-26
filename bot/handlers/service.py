@@ -105,17 +105,13 @@ async def cmd_menu(message: Message, storage: Storage) -> None:
     owner_id = message.from_user.id
     storage.db.ensure_owner(owner_id, is_admin=storage.is_admin(owner_id))
     connections = storage.connections_for_owner(owner_id)
-    conn_count = len(connections)
-    status_icon = "🟢" if conn_count else "🟡"
-    status_text = (
-        f"Активных аккаунтов: <b>{conn_count}</b>"
-        if conn_count
-        else "<i>Бот пока не привязан к аккаунту</i>"
-    )
+    is_connected = bool(connections)
+    status_icon = "🟢" if is_connected else "🔴"
+    status_text = "Подключён" if is_connected else "Не подключён"
 
     text = (
-        f"{status_icon} <b>AyuAutoBot — Меню</b>\n\n"
-        f"🔗 <b>Статус:</b> {status_text}\n\n"
+        f"<b>🤖 AyuAutoBot — Меню</b>\n\n"
+        f"🔗 <b>Статус:</b> {status_icon} {status_text}\n\n"
         "Выберите необходимый раздел:"
     )
     await message.answer(text, reply_markup=menu_keyboard())
@@ -132,17 +128,13 @@ async def us_close(call: CallbackQuery) -> None:
 async def us_back(call: CallbackQuery, storage: Storage) -> None:
     owner_id = call.from_user.id
     connections = storage.connections_for_owner(owner_id)
-    conn_count = len(connections)
-    status_icon = "🟢" if conn_count else "🟡"
-    status_text = (
-        f"Активных аккаунтов: <b>{conn_count}</b>"
-        if conn_count
-        else "<i>Бот пока не привязан к аккаунту</i>"
-    )
+    is_connected = bool(connections)
+    status_icon = "🟢" if is_connected else "🔴"
+    status_text = "Подключён" if is_connected else "Не подключён"
 
     text = (
-        f"{status_icon} <b>AyuAutoBot — Меню</b>\n\n"
-        f"🔗 <b>Статус:</b> {status_text}\n\n"
+        f"<b>🤖 AyuAutoBot — Меню</b>\n\n"
+        f"🔗 <b>Статус:</b> {status_icon} {status_text}\n\n"
         "Выберите необходимый раздел:"
     )
     await call.message.edit_text(text, reply_markup=menu_keyboard())
@@ -526,6 +518,7 @@ async def us_preset_cancel(call: CallbackQuery) -> None:
 # -------------------------------------------------------------------------- /admin
 def _admin_overview_text(storage: Storage, backup: BackupManager) -> str:
     settings = storage.get_global()
+    s48 = storage.get_stats_48h()
     return format_admin_overview(
         owners_count=storage.db.owners_count(),
         connections_count=storage.db.connections_count(),
@@ -537,6 +530,11 @@ def _admin_overview_text(storage: Storage, backup: BackupManager) -> str:
         backup_interval_hours=settings.backup_interval_hours,
         last_backup_ts=backup.last_backup_ts,
         total_stars=storage.payments_total_stars(),
+        active_users_48h=s48["active_users"],
+        msgs_48h=s48["messages"],
+        media_msgs_48h=s48["media_msgs"],
+        edits_48h=s48["edits"],
+        deletes_48h=s48["deletes"],
     )
 
 
@@ -579,7 +577,11 @@ async def ad_open(call: CallbackQuery, storage: Storage) -> None:
             text = "Пока нет ни одного пользователя."
             await call.message.edit_text(text, reply_markup=admin_back_keyboard())
         else:
-            text = f"<b>👥 Пользователи ({len(owners)})</b>\n<i>Нажмите ID чтобы забанить/разбанить пользователя</i>"
+            text = (
+                f"<b>👥 Нагрузка по пользователям за 48 часов ({len(owners)})</b>\n"
+                "<i>Формат: [Статус ID | 48h: Сообщений | Медиа (Размер на диске)]\n"
+                "Нажмите «Забанить», если пользователь создаёт чрезмерную нагрузку.</i>"
+            )
             await call.message.edit_text(text, reply_markup=admin_users_keyboard(owners))
         await call.answer()
         return

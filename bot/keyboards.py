@@ -212,17 +212,20 @@ def admin_main_keyboard() -> InlineKeyboardMarkup:
 
 
 def admin_users_keyboard(owners: list[dict]) -> InlineKeyboardMarkup:
-    """Keyboard for admin users list with ban/unban buttons."""
+    """Keyboard for admin users list with 48h resource usage stats and ban/unban buttons."""
     rows: list[list[InlineKeyboardButton]] = []
-    import time as _t
     for o in owners[:30]:
         uid = o["owner_id"]
         is_banned = o.get("is_banned", False)
         is_admin = o.get("is_admin", False)
         conns = o.get("connections", 0)
-        msgs = o.get("messages", 0)
-        last_seen = _t.strftime("%d.%m", _t.localtime(o.get("last_seen", 0)))
-        label = f"{'🔴' if is_banned else ('⭐' if is_admin else '🟢')} {uid} [{conns}🔗 {msgs}💬 {last_seen}]"
+        msgs_48h = o.get("msgs_48h", 0) or 0
+        media_48h = o.get("media_48h", 0) or 0
+        media_mb = o.get("media_mb", 0.0) or 0.0
+        
+        status_icon = "🔴" if is_banned else ("⭐" if is_admin else ("🟢" if conns else "⚪"))
+        
+        label = f"{status_icon} {uid} | 48h: {msgs_48h}💬 {media_48h}🖼 ({media_mb:.1f}MB)"
         if is_banned:
             action_btn = InlineKeyboardButton(text="✅ Разбанить", callback_data=f"ad:user:unban:{uid}")
         else:
@@ -230,6 +233,7 @@ def admin_users_keyboard(owners: list[dict]) -> InlineKeyboardMarkup:
         rows.append([InlineKeyboardButton(text=label, callback_data="ad:noop"), action_btn])
     rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="ad:back")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
 
 
 def admin_section_keyboard(section: str, settings: GlobalSettings) -> InlineKeyboardMarkup:

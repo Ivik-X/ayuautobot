@@ -281,6 +281,57 @@ class Database:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def stats_48h(self, cutoff_ts: float) -> dict[str, int]:
+        active_users = self._conn.execute(
+            "SELECT COUNT(DISTINCT owner_id) FROM messages WHERE cached_at >= ?", (cutoff_ts,)
+        ).fetchone()[0] or 0
+
+        msgs = self._conn.execute(
+            "SELECT COUNT(*) FROM messages WHERE cached_at >= ?", (cutoff_ts,)
+        ).fetchone()[0] or 0
+
+        media_msgs = self._conn.execute(
+            "SELECT COUNT(*) FROM messages WHERE cached_at >= ? AND media_kind IS NOT NULL", (cutoff_ts,)
+        ).fetchone()[0] or 0
+
+        edits = self._conn.execute(
+            "SELECT COUNT(*) FROM messages WHERE edited_at IS NOT NULL AND edited_at >= ?", (cutoff_ts,)
+        ).fetchone()[0] or 0
+
+        deletes = self._conn.execute(
+            "SELECT COUNT(*) FROM messages WHERE deleted_at IS NOT NULL AND deleted_at >= ?", (cutoff_ts,)
+        ).fetchone()[0] or 0
+
+        return {
+            "active_users": int(active_users),
+            "messages": int(msgs),
+            "media_msgs": int(media_msgs),
+            "edits": int(edits),
+            "deletes": int(deletes),
+        }
+
+    def all_owners_with_stats_48h(self, cutoff_ts: float) -> list[dict]:
+        """Returns owners with resource usage statistics over the last 48 hours."""
+        rows = self._conn.execute(
+            """
+            SELECT o.owner_id, o.is_admin, o.is_banned, o.created_at, o.last_seen,
+                   COUNT(DISTINCT c.connection_id) AS connections,
+                   COUNT(m.message_id) AS total_messages,
+                   SUM(CASE WHEN m.cached_at >= ? THEN 1 ELSE 0 END) AS msgs_48h,
+                   SUM(CASE WHEN m.cached_at >= ? AND m.media_kind IS NOT NULL THEN 1 ELSE 0 END) AS media_48h,
+                   SUM(CASE WHEN m.edited_at >= ? THEN 1 ELSE 0 END) AS edits_48h,
+                   SUM(CASE WHEN m.deleted_at >= ? THEN 1 ELSE 0 END) AS deletes_48h
+            FROM owners o
+            LEFT JOIN connections c ON c.owner_id = o.owner_id AND c.is_enabled = 1
+            LEFT JOIN messages m ON m.owner_id = o.owner_id
+            GROUP BY o.owner_id
+            ORDER BY msgs_48h DESC, total_messages DESC, o.last_seen DESC
+            """,
+            (cutoff_ts, cutoff_ts, cutoff_ts, cutoff_ts),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
     def ban_user(self, owner_id: int) -> None:
         self._conn.execute("UPDATE owners SET is_banned=1 WHERE owner_id=?", (owner_id,))
         self._conn.commit()

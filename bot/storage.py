@@ -7,7 +7,7 @@ from aiogram.types import BusinessConnection, Message
 
 from bot.cache import LRUCache
 from bot.database import Database
-from bot.media import MediaRef, media_flags, unlink_media
+from bot.media import MEDIA_DIR, MediaRef, directory_size_bytes, media_flags, unlink_media
 from bot.models import CachedMessage, MuteSession
 from bot.settings import GlobalSettings, OwnerSettings
 from bot.stats import ChatStats
@@ -299,8 +299,22 @@ class Storage:
     def unban_user(self, owner_id: int) -> None:
         self._db.unban_user(owner_id)
 
+    def get_stats_48h(self) -> dict[str, int]:
+        cutoff = time.time() - (48 * 3600)
+        return self._db.stats_48h(cutoff)
+
     def all_owners_with_stats(self) -> list[dict]:
-        return self._db.all_owners_with_stats()
+        cutoff = time.time() - (48 * 3600)
+        owners = self._db.all_owners_with_stats_48h(cutoff)
+        for o in owners:
+            owner_id = o["owner_id"]
+            conn_ids = self.connections_for_owner(owner_id)
+            total_bytes = 0
+            for cid in conn_ids:
+                total_bytes += directory_size_bytes(MEDIA_DIR / cid)
+            o["media_mb"] = total_bytes / (1024 * 1024)
+        return owners
+
 
     # ------------------------------------------------------------------ mute
     def start_mute(self, connection_id: str, chat_id: int, *, seconds: int | None = None, count: int | None = None) -> None:
