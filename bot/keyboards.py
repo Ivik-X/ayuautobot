@@ -137,8 +137,9 @@ def recent_count_keyboard(chat_id: int) -> InlineKeyboardMarkup:
 
 def ghost_settings_keyboard(enabled: bool, operators: list) -> InlineKeyboardMarkup:
     state = "✅" if enabled else "⬜️"
+    btn_text = f"{state} Режим призрака {'включён' if enabled else 'выключен'}"
     rows: list[list[InlineKeyboardButton]] = [
-        [InlineKeyboardButton(text=f"{state} Режим призрака включён", callback_data="gs:toggle")],
+        [InlineKeyboardButton(text=btn_text, callback_data="gs:toggle")],
     ]
     if enabled:
         rows.append([InlineKeyboardButton(text="📂 Открыть чаты", callback_data="gh:list")])
@@ -200,10 +201,34 @@ def admin_main_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="👥 Пользователи", callback_data="ad:open:users"),
         ],
         [InlineKeyboardButton(text="🎟 Промокоды", callback_data="ad:promo:list")],
-        [InlineKeyboardButton(text="📤 Сделать бэкап сейчас", callback_data="ad:backupnow")],
+        [
+            InlineKeyboardButton(text="📤 Сделать бэкап сейчас", callback_data="ad:backupnow"),
+            InlineKeyboardButton(text="📥 Загрузить бэкап", callback_data="ad:restore"),
+        ],
         [InlineKeyboardButton(text="📢 Рассылка всем", callback_data="ad:broadcast")],
         [InlineKeyboardButton(text="✖️ Закрыть", callback_data="ad:close")],
     ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def admin_users_keyboard(owners: list[dict]) -> InlineKeyboardMarkup:
+    """Keyboard for admin users list with ban/unban buttons."""
+    rows: list[list[InlineKeyboardButton]] = []
+    import time as _t
+    for o in owners[:30]:
+        uid = o["owner_id"]
+        is_banned = o.get("is_banned", False)
+        is_admin = o.get("is_admin", False)
+        conns = o.get("connections", 0)
+        msgs = o.get("messages", 0)
+        last_seen = _t.strftime("%d.%m", _t.localtime(o.get("last_seen", 0)))
+        label = f"{'🔴' if is_banned else ('⭐' if is_admin else '🟢')} {uid} [{conns}🔗 {msgs}💬 {last_seen}]"
+        if is_banned:
+            action_btn = InlineKeyboardButton(text="✅ Разбанить", callback_data=f"ad:user:unban:{uid}")
+        else:
+            action_btn = InlineKeyboardButton(text="🚫 Забанить", callback_data=f"ad:user:ban:{uid}")
+        rows.append([InlineKeyboardButton(text=label, callback_data="ad:noop"), action_btn])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="ad:back")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

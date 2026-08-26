@@ -32,6 +32,7 @@ class Storage:
         )
         self._mute: dict[tuple[str, int], MuteSession] = {}
         self._bot_deleted: set[tuple[str, int, int]] = set()
+        self._bot_edited: set[tuple[str, int, int]] = set()  # редактирование ботом (антипоиск/.view)
         self._afk_last_reply: dict[tuple[str, int], float] = {}
 
     @property
@@ -272,6 +273,34 @@ class Storage:
             self._bot_deleted.discard(key)
             return True
         return False
+
+    # -------------------------------------------------------------- bot edits
+    def mark_bot_edited(self, connection_id: str, chat_id: int, message_id: int) -> None:
+        """Пометить сообщение как отредактированное ботом (антипоиск, .view).
+        on_edited_business_message проверяет это и не шлёт уведомление.
+        """
+        self._bot_edited.add((connection_id, chat_id, message_id))
+
+    def was_bot_edited(self, connection_id: str, chat_id: int, message_id: int) -> bool:
+        """Проверить и сбросить пометку bot-edit. Вызывается один раз — из on_edited."""
+        key = (connection_id, chat_id, message_id)
+        if key in self._bot_edited:
+            self._bot_edited.discard(key)
+            return True
+        return False
+
+    # ------------------------------------------------------------------ ban
+    def is_user_banned(self, owner_id: int) -> bool:
+        return self._db.is_banned(owner_id)
+
+    def ban_user(self, owner_id: int) -> None:
+        self._db.ban_user(owner_id)
+
+    def unban_user(self, owner_id: int) -> None:
+        self._db.unban_user(owner_id)
+
+    def all_owners_with_stats(self) -> list[dict]:
+        return self._db.all_owners_with_stats()
 
     # ------------------------------------------------------------------ mute
     def start_mute(self, connection_id: str, chat_id: int, *, seconds: int | None = None, count: int | None = None) -> None:

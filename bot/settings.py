@@ -126,7 +126,6 @@ COMMAND_FIELDS: list[SettingField] = [
 ]
 
 MISC_FIELDS: list[SettingField] = [
-    SettingField("cache_ttl_hours", "⏱ TTL кэша (часы)", "float"),
     SettingField("mute_default_seconds", "🔇 Mute по умолчанию (сек)", "int"),
 ]
 
@@ -176,7 +175,6 @@ class GlobalSettings:
     free_view_enabled: bool = False
     free_afk_enabled: bool = False
     free_antisearch_enabled: bool = False
-    free_stt_enabled: bool = False
     free_ghost_enabled: bool = False
     free_extra_features_enabled: bool = False  # анонимные стикеры, .watch, экспорт, последние сообщения
 

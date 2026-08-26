@@ -70,27 +70,17 @@ class WebhookConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class SttConfig:
-    enabled: bool
-    model_size: str          # tiny / base / small / medium / large-v3
-    language: str | None     # None = автоопределение
-    models_dir: Path
-
-
-@dataclass(frozen=True, slots=True)
 class Config:
     """Инфраструктурные настройки (задаются один раз через .env / переменные окружения).
 
     Всё, что можно менять на лету без передеплоя (бэкапы, кэш, квоты медиа,
-    сохранение всех сообщений, персональные настройки владельцев) живёт в БД
-    и управляется через /admin и /settings — см. bot.settings.
+    персональные настройки владельцев) живёт в БД и управляется через /admin.
     """
 
     bot_token: str
     admin_ids: set[int]
     db_path: Path
     seed_global_settings: GlobalSettings
-    stt: SttConfig
     webhook: WebhookConfig
     texts: Texts = field(default_factory=load_texts)
 
@@ -119,13 +109,6 @@ def load_config() -> Config:
         profile_watch_interval_min=_int("PROFILE_WATCH_INTERVAL_MIN", 30),
     )
 
-    stt = SttConfig(
-        enabled=_bool("STT_ENABLED", False),
-        model_size=os.getenv("STT_MODEL_SIZE", "base").strip() or "base",
-        language=(os.getenv("STT_LANGUAGE", "").strip() or None),
-        models_dir=DATA_DIR / "stt_models",
-    )
-
     webhook = WebhookConfig(
         url=os.getenv("WEBHOOK_URL", "").strip().rstrip("/"),
         path=os.getenv("WEBHOOK_PATH", "/webhook").strip(),
@@ -139,7 +122,6 @@ def load_config() -> Config:
         admin_ids=_int_set("ADMIN_IDS"),
         db_path=db_path,
         seed_global_settings=seed,
-        stt=stt,
         webhook=webhook,
         texts=load_texts(),
     )

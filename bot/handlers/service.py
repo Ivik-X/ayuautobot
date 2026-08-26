@@ -12,17 +12,16 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, FSInputFile, Message
 
 from bot.backup import BackupManager
-from bot.media import MEDIA_DIR, MediaRef, directory_size_bytes, download_bytes, extract_media, send_media_copy
+from bot.media import MEDIA_DIR, MediaRef, directory_size_bytes, extract_media, send_media_copy
 from bot import ghost, subscription
-from bot.config import SttConfig
 from bot.handlers import billing as billing_handlers
 from bot.handlers import ghost as ghost_handlers
 from bot.features.chat_export import build_export_html, build_export_json
-from bot.features.stt_local import SttError, transcribe_local
 from bot.keyboards import (
     admin_back_keyboard,
     admin_main_keyboard,
     admin_section_keyboard,
+    admin_users_keyboard,
     chats_export_keyboard,
     chats_recent_keyboard,
     ghost_settings_keyboard,
@@ -100,27 +99,13 @@ async def help_close(call: CallbackQuery) -> None:
     await call.answer()
 
 
-# ---------------------------------------------------------------------- /settings
-@router.message(Command("settings"))
-async def cmd_settings(message: Message, storage: Storage) -> None:
-    owner_id = message.from_user.id
-    storage.db.ensure_owner(owner_id, is_admin=storage.is_admin(owner_id))
-    settings = storage.get_settings(owner_id)
-    digest_count = storage.queue_count(owner_id)
-    await message.answer(
-        "<b>🔔 Уведомления</b>",
-        reply_markup=notifications_keyboard(settings, digest_count),
-    )
-
-
-# -------------------------------------------------------------------------- /menu
+# ---------------------------------------------------------------------- /menu
 @router.message(Command("menu"))
 async def cmd_menu(message: Message, storage: Storage) -> None:
     owner_id = message.from_user.id
     storage.db.ensure_owner(owner_id, is_admin=storage.is_admin(owner_id))
     connections = storage.connections_for_owner(owner_id)
     conn_count = len(connections)
-    db_count = storage.db_count()
     status_icon = "🟢" if conn_count else "🟡"
     status_text = (
         f"Активных аккаунтов: <b>{conn_count}</b>"
@@ -129,9 +114,8 @@ async def cmd_menu(message: Message, storage: Storage) -> None:
     )
 
     text = (
-        f"{status_icon} <b>AyuAutoBot — Панель управления</b>\n\n"
-        f"🔗 <b>Статус:</b> {status_text}\n"
-        f"📊 <b>Сообщений в БД:</b> <b>{db_count}</b>\n\n"
+        f"{status_icon} <b>AyuAutoBot — Меню</b>\n\n"
+        f"🔗 <b>Статус:</b> {status_text}\n\n"
         "Выберите необходимый раздел:"
     )
     await message.answer(text, reply_markup=menu_keyboard())
@@ -149,7 +133,6 @@ async def us_back(call: CallbackQuery, storage: Storage) -> None:
     owner_id = call.from_user.id
     connections = storage.connections_for_owner(owner_id)
     conn_count = len(connections)
-    db_count = storage.db_count()
     status_icon = "🟢" if conn_count else "🟡"
     status_text = (
         f"Активных аккаунтов: <b>{conn_count}</b>"
@@ -158,9 +141,8 @@ async def us_back(call: CallbackQuery, storage: Storage) -> None:
     )
 
     text = (
-        f"{status_icon} <b>AyuAutoBot — Панель управления</b>\n\n"
-        f"🔗 <b>Статус:</b> {status_text}\n"
-        f"📊 <b>Сообщений в БД:</b> <b>{db_count}</b>\n\n"
+        f"{status_icon} <b>AyuAutoBot — Меню</b>\n\n"
+        f"🔗 <b>Статус:</b> {status_text}\n\n"
         "Выберите необходимый раздел:"
     )
     await call.message.edit_text(text, reply_markup=menu_keyboard())
@@ -592,16 +574,13 @@ async def ad_open(call: CallbackQuery, storage: Storage) -> None:
     section = call.data.split(":", 2)[2]
 
     if section == "users":
-        rows = storage.db.all_connections()
-        if not rows:
-            text = "Пока нет ни одного подключённого бизнес-аккаунта."
+        owners = storage.all_owners_with_stats()
+        if not owners:
+            text = "Пока нет ни одного пользователя."
+            await call.message.edit_text(text, reply_markup=admin_back_keyboard())
         else:
-            lines = ["<b>👥 Подключения</b>"]
-            for row in rows:
-                status = "🟢" if row["is_enabled"] else "🔴"
-                lines.append(f"{status} owner=<code>{row['owner_id']}</code> conn=<code>{row['connection_id']}</code>")
-            text = "\n".join(lines)
-        await call.message.edit_text(text, reply_markup=admin_back_keyboard())
+            text = f"<b>👥 Пользователи ({len(owners)})</b>\n<i>Нажмите ID чтобы забанить/разбанить пользователя</i>"
+            await call.message.edit_text(text, reply_markup=admin_users_keyboard(owners))
         await call.answer()
         return
 
@@ -709,6 +688,50 @@ async def ad_promo_del(call: CallbackQuery, storage: Storage) -> None:
     await call.answer("Удалено")
 
 
+@router.callback_query(F.data.startswith("ad:user:ban:"))
+async def ad_user_ban(call: CallbackQuery, storage: Storage) -> None:
+    if not storage.is_admin(call.from_user.id):
+        await call.answer()
+        return
+    target_id = int(call.data.split(":", 3)[3])
+    if target_id == call.from_user.id:
+        await call.answer("Себя забанить нельзя", show_alert=True)
+        return
+    storage.ban_user(target_id)
+    owners = storage.all_owners_with_stats()
+    await call.message.edit_reply_markup(reply_markup=admin_users_keyboard(owners))
+    await call.answer(f"🚫 Пользователь {target_id} забанен")
+
+
+@router.callback_query(F.data.startswith("ad:user:unban:"))
+async def ad_user_unban(call: CallbackQuery, storage: Storage) -> None:
+    if not storage.is_admin(call.from_user.id):
+        await call.answer()
+        return
+    target_id = int(call.data.split(":", 3)[3])
+    storage.unban_user(target_id)
+    owners = storage.all_owners_with_stats()
+    await call.message.edit_reply_markup(reply_markup=admin_users_keyboard(owners))
+    await call.answer(f"✅ Пользователь {target_id} разбанен")
+
+
+@router.callback_query(F.data == "ad:restore")
+async def ad_restore(call: CallbackQuery, storage: Storage) -> None:
+    """Admins sends .db file -> bot will hot-swap current database."""
+    if not storage.is_admin(call.from_user.id):
+        await call.answer()
+        return
+    _pending[call.from_user.id] = {"kind": "restore_db", "created_at": time.time()}
+    await call.answer()
+    await call.message.answer(
+        "⚠️ <b>Загрузка бэкапа</b>\n\n"
+        "Отправьте файл <code>.db</code> единственным сообщением.\n"
+        "Текущая БД будет заменена <b>без перезапуска бота</b>.\n"
+        "Данные в RAM-кэше (<i>не сохранённые в БД до загрузки</i>) будут потеряны.\n\n"
+        "Для отмены отправьте /cancel.",
+    )
+
+
 # ------------------------------------------------------------- catch-all private input
 def _not_a_command(message: Message) -> bool:
     if message.successful_payment is not None:
@@ -717,7 +740,7 @@ def _not_a_command(message: Message) -> bool:
 
 
 @router.message(F.chat.type == "private", _not_a_command)
-async def private_input(message: Message, storage: Storage, stt_config: SttConfig) -> None:
+async def private_input(message: Message, storage: Storage) -> None:
     if message.from_user is None:
         return
     user_id = message.from_user.id
@@ -734,10 +757,6 @@ async def private_input(message: Message, storage: Storage, stt_config: SttConfi
             return
         if await ghost_handlers.handle_session_relay(message, storage):
             return
-        # Голосовые/кружки/аудио, отправленные боту напрямую (не часть другого
-        # диалога) — расшифровываем, если настроен STT.
-        if message.voice or message.video_note or message.audio:
-            await _handle_stt(message, storage, stt_config)
         return
 
     kind = state["kind"]
@@ -777,6 +796,39 @@ async def private_input(message: Message, storage: Storage, stt_config: SttConfi
             f"✅ Сохранено: {field.label} = {value}",
             reply_markup=admin_section_keyboard(state["section"], settings),
         )
+        return
+
+    if kind == "restore_db":
+        if not storage.is_admin(user_id):
+            _pending.pop(user_id, None)
+            return
+        doc = message.document
+        if doc is None:
+            await message.answer("❌ Нужен документ (.db файл). Попробуйте ещё раз или /cancel для отмены.")
+            return
+        if not (doc.file_name or "").endswith(".db"):
+            await message.answer("❌ Файл должен иметь расширение .db. Попробуйте ещё раз или /cancel.")
+            return
+        _pending.pop(user_id, None)
+        status = await message.answer("⏳ Загружаю файл и заменяю БД…")
+        try:
+            from bot.media import download_bytes
+            data = await download_bytes(message.bot, doc.file_id)
+            if not data:
+                await status.edit_text("❌ Не удалось скачать файл.")
+                return
+            await asyncio.get_event_loop().run_in_executor(None, storage.db.restore_from_bytes, data)
+            # Сбрасываем RAM-кэши которые теперь устарели
+            storage._settings_cache.clear()
+            storage._global_settings = None
+            await status.edit_text(
+                "✅ <b>База данных успешно восстановлена.</b>\n"
+                "RAM-кэш сообщений остался от старой версии — он вытеснится автоматически при следующей записи.\n"
+                "Настройки (admin и user) уже загружены из новой БД."
+            )
+        except Exception as exc:
+            logger.exception("Ошибка при восстановлении БД из бэкапа")
+            await status.edit_text(f"❌ Ошибка при восстановлении: {exc}")
         return
 
     if kind == "afk_text":
@@ -856,52 +908,7 @@ async def private_input(message: Message, storage: Storage, stt_config: SttConfi
         return
 
 
-async def _handle_stt(message: Message, storage: Storage, stt_config: SttConfig) -> None:
-    if not stt_config.enabled or message.from_user is None:
-        return  # STT выключен (STT_ENABLED=false в .env) — молчим
-
-    media = extract_media(message)
-    if media is None:
-        return
-
-    # Только голосовые/кружки/аудио
-    if media.kind not in ("voice", "video_note", "audio"):
-        return
-
-    # Определяем источник для подписи (особенно важно для пересланных ГС)
-    source_note = ""
-    if message.forward_origin:
-        origin = message.forward_origin
-        if hasattr(origin, "sender_user") and origin.sender_user:
-            source_note = f" (от {origin.sender_user.full_name})"
-        elif hasattr(origin, "sender_user_name") and origin.sender_user_name:
-            source_note = f" (от {origin.sender_user_name})"
-        elif hasattr(origin, "chat") and origin.chat:
-            source_note = f" (из {origin.chat.full_name or origin.chat.username or 'канала'})"
-
-    status = await message.answer(
-        f"🎙 Распознаю{source_note} (первый запуск может занять время — грузится модель)…"
-    )
-
-    data = await download_bytes(message.bot, media.file_id)
-    if data is None:
-        await status.edit_text(
-            "❌ Не удалось скачать файл для распознавания.\n"
-            "<i>Возможно, это одноразовое или защищённое сообщение — Telegram не даёт его скачать.</i>"
-        )
-        return
-
-    try:
-        text = await transcribe_local(
-            data, model_size=stt_config.model_size, models_dir=stt_config.models_dir, language=stt_config.language
-        )
-        header = f"📝 <b>Расшифровка{source_note}:</b>"
-        await status.edit_text(f"{header}\n{text}")
-    except SttError as exc:
-        await status.edit_text(f"❌ Не удалось распознать: {exc}")
-
-
-def _message_to_preset_item(message: Message) -> dict | None:
+async def _message_to_preset_item(message: Message) -> dict | None:
     media = extract_media(message)
     if media is not None:
         return {"type": "media", "kind": media.kind, "file_id": media.file_id}

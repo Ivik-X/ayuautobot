@@ -9,6 +9,7 @@ import aiohttp
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.types import Update
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
 
@@ -64,7 +65,21 @@ async def main() -> None:
     dp["texts"] = config.texts
     dp["http_session"] = http_session
     dp["backup"] = backup_manager
-    dp["stt_config"] = config.stt
+
+    @dp.update.outer_middleware()
+    async def ban_middleware(handler, event: Update, data: dict):
+        """Block updates from banned users."""
+        # Получаем user_id из разных типов апдейтов
+        user_id: int | None = None
+        if event.message and event.message.from_user:
+            user_id = event.message.from_user.id
+        elif event.callback_query and event.callback_query.from_user:
+            user_id = event.callback_query.from_user.id
+
+        if user_id and storage.is_user_banned(user_id):
+            # Холодно игнорируем забаненных (не отвечаем даже ошибкой — просто молчим)
+            return
+        return await handler(event, data)
 
     dp.include_router(service.router)
     dp.include_router(ghost_handlers.router)

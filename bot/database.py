@@ -221,6 +221,12 @@ class Database:
             logger.info("Миграция БД: добавляю колонку messages.read_at")
             self._conn.execute("ALTER TABLE messages ADD COLUMN read_at REAL")
             self._conn.commit()
+        # Колонка is_banned в таблице owners
+        owner_columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(owners)").fetchall()}
+        if "is_banned" not in owner_columns:
+            logger.info("Миграция БД: добавляю колонку owners.is_banned")
+            self._conn.execute("ALTER TABLE owners ADD COLUMN is_banned INTEGER NOT NULL DEFAULT 0")
+            self._conn.commit()
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_owner ON messages(owner_id)")
         self._conn.commit()
 
@@ -258,6 +264,48 @@ class Database:
 
     def all_owners(self) -> list[sqlite3.Row]:
         return self._conn.execute("SELECT * FROM owners ORDER BY last_seen DESC").fetchall()
+
+    def all_owners_with_stats(self) -> list[dict]:
+        """Returns owners with connection count and message count for admin panel."""
+        rows = self._conn.execute(
+            """
+            SELECT o.owner_id, o.is_admin, o.is_banned, o.created_at, o.last_seen,
+                   COUNT(DISTINCT c.connection_id) AS connections,
+                   COUNT(DISTINCT m.message_id) AS messages
+            FROM owners o
+            LEFT JOIN connections c ON c.owner_id = o.owner_id AND c.is_enabled = 1
+            LEFT JOIN messages m ON m.owner_id = o.owner_id
+            GROUP BY o.owner_id
+            ORDER BY o.last_seen DESC
+            """
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def ban_user(self, owner_id: int) -> None:
+        self._conn.execute("UPDATE owners SET is_banned=1 WHERE owner_id=?", (owner_id,))
+        self._conn.commit()
+
+    def unban_user(self, owner_id: int) -> None:
+        self._conn.execute("UPDATE owners SET is_banned=0 WHERE owner_id=?", (owner_id,))
+        self._conn.commit()
+
+    def is_banned(self, owner_id: int) -> bool:
+        row = self._conn.execute("SELECT is_banned FROM owners WHERE owner_id=?", (owner_id,)).fetchone()
+        return bool(row["is_banned"]) if row else False
+
+    def restore_from_bytes(self, data: bytes) -> None:
+        """Hot-swap database: replaces current DB content with data from backup bytes.
+        Uses SQLite's backup API for safe in-memory transfer.
+        """
+        import io
+        src_conn = sqlite3.connect(":memory:")
+        src_conn.row_factory = sqlite3.Row
+        src_conn.deserialize(data)
+        # Backup src -> dst (current) using SQLite's C-level backup
+        src_conn.backup(self._conn)
+        src_conn.close()
+        # Re-run migrate to ensure schema is up to date after restore
+        self._migrate()
 
     # -------------------------------------------------------------- connections
     def upsert_connection(self, connection_id: str, owner_id: int, user_chat_id: int, is_enabled: bool) -> None:

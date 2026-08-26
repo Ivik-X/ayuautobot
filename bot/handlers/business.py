@@ -109,6 +109,11 @@ async def on_edited_business_message(message: Message, bot: Bot, storage: Storag
     if connection is None:
         return
 
+    # Если редактирование было вызвано самим ботом (антипоиск / .view) — игнорируем
+    if storage.was_bot_edited(connection_id, message.chat.id, message.message_id):
+        await _cache_message(message, bot, storage, connection_id)
+        return
+
     settings = storage.get_settings_for_connection(connection_id)
     owner_id = storage.owner_user_id(connection_id)
 
@@ -189,7 +194,12 @@ async def on_deleted_business_messages(event: BusinessMessagesDeleted, bot: Bot,
             f"<b>Содержимое:</b>\n{html.escape(body)}"
         )
 
+        # Одноразовые/защищённые медиа: Telegram не даёт скопировать их через API
         media = cached.media if cached else None
+        if media is not None and "🔒" in " ".join(cached.flags or []):
+            # защищённое — шлём только текстовое уведомление (Telegram заблокирует file_id)
+            caption += "\n\n<i>[🔒 Одноразовое/защищённое медиа — Telegram не позволяет скопировать его]</i>"
+            media = None
         await _dispatch_notification(
             bot, storage, connection_id, owner_id, settings.notify_delete_mode, "delete",
             caption=caption, media=media,
@@ -353,7 +363,7 @@ async def _handle_owner_message(
 
     if command is None:
         if settings.anti_search and message.text and not message.text.startswith("."):
-            await _apply_antisearch(message, bot, connection_id)
+            await _apply_antisearch(message, bot, storage, connection_id)
         elif settings.anon_stickers and message.sticker and not (message.sticker.is_animated or message.sticker.is_video):
             await _anonymize_sticker(message, bot, storage, connection_id)
         return
@@ -774,10 +784,12 @@ async def _view_timer(bot: Bot, storage: Storage, connection_id: str, chat_id: i
 
 
 # ---------------------------------------------------------- anti-search / anon stickers
-async def _apply_antisearch(message: Message, bot: Bot, connection_id: str) -> None:
+async def _apply_antisearch(message: Message, bot: Bot, storage: Storage, connection_id: str) -> None:
     transformed = antisearch_transform(message.text)
     if transformed == message.text:
         return
+    # Помечаем до редактирования, чтобы on_edited_business_message не слал уведомление
+    storage.mark_bot_edited(connection_id, message.chat.id, message.message_id)
     try:
         await bot.edit_message_text(
             business_connection_id=connection_id,
@@ -787,6 +799,7 @@ async def _apply_antisearch(message: Message, bot: Bot, connection_id: str) -> N
         )
     except Exception:
         logger.exception("Не удалось применить антипоиск")
+        storage.was_bot_edited(connection_id, message.chat.id, message.message_id)  # сбросить пометку если не удалось
 
 
 async def _anonymize_sticker(message: Message, bot: Bot, storage: Storage, connection_id: str) -> None:

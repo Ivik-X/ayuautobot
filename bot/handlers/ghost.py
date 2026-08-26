@@ -266,13 +266,23 @@ async def relay_live_message(bot, storage: Storage, connection_id: str, chat_id:
     if not watchers:
         return
     content = describe_message(message)
-    text = f"🔵 <b>Собеседник:</b> {html.escape(content)}"
     media = extract_media(message)
+    header = f"🔵 <b>Собеседник:</b>"
+
     for operator_id in watchers:
         try:
-            if media is not None:
-                await send_media_copy(bot, operator_id, media, caption=text)
+            if media is not None and media.local_path and media.local_path.exists():
+                # Есть локальная копия — шлём медиа с описанием как подписью
+                await send_media_copy(bot, operator_id, media, caption=f"{header} {html.escape(content)}")
+            elif media is not None and media.file_id:
+                # Нет локальной копии, но есть file_id — пробуем через file_id
+                try:
+                    await send_media_copy(bot, operator_id, media, caption=f"{header} {html.escape(content)}")
+                except Exception:
+                    # file_id недоступен (одноразовое/защищённое) — шлём текстовое описание
+                    await bot.send_message(chat_id=operator_id, text=f"{header} {html.escape(content)}")
             else:
-                await bot.send_message(chat_id=operator_id, text=text)
+                # Текстовое сообщение или нет медиа
+                await bot.send_message(chat_id=operator_id, text=f"{header} {html.escape(content)}")
         except Exception:
             logger.exception("Не удалось транслировать сообщение в открытую ghost-сессию")
