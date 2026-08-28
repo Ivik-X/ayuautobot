@@ -22,6 +22,7 @@ from bot.keyboards import (
     admin_main_keyboard,
     admin_section_keyboard,
     admin_users_keyboard,
+    admin_whitelist_keyboard,
     chats_export_keyboard,
     chats_recent_keyboard,
     ghost_settings_keyboard,
@@ -31,7 +32,6 @@ from bot.keyboards import (
     notifications_keyboard,
     preset_creation_keyboard,
     presets_keyboard,
-    promo_list_keyboard,
     recent_count_keyboard,
     section_keyboard,
 )
@@ -64,11 +64,24 @@ _pending: dict[int, dict] = {}
 @router.message(CommandStart())
 async def cmd_start(message: Message, storage: Storage, texts: Texts) -> None:
     is_admin = storage.is_admin(message.from_user.id)
-    storage.db.ensure_owner(message.from_user.id, is_admin=is_admin)
-    hint = DEFAULT_ADMIN_HINT if is_admin else ""
+    is_new = storage.db.ensure_owner(message.from_user.id, is_admin=is_admin)
+
+    if is_new and not is_admin:
+        for admin_id in storage._admin_ids:
+            try:
+                user_info = f"<b>{html.escape(message.from_user.full_name)}</b>"
+                if message.from_user.username:
+                    user_info += f" (@{message.from_user.username})"
+                await message.bot.send_message(
+                    chat_id=admin_id,
+                    text=f"🆕 <b>Новый пользователь в боте!</b>\nID: <code>{message.from_user.id}</code>\nПользователь: {user_info}"
+                )
+            except Exception:
+                pass
+
     me = await message.bot.get_me()
     username = f"@{me.username}" if me.username else "имя бота из его профиля"
-    text = texts.start.replace("{admin_hint}", hint).replace("{bot_username}", username)
+    text = texts.start.replace("{admin_hint}", "").replace("{bot_username}", username)
     await message.answer(text)
 
 
@@ -586,6 +599,17 @@ async def ad_open(call: CallbackQuery, storage: Storage) -> None:
         await call.answer()
         return
 
+    if section == "whitelist":
+        items = storage.whitelist_all()
+        text = (
+            f"<b>⚪️ Белый список (Whitelist) ({len(items)})</b>\n"
+            "Пользователи и чаты в этом списке полностью игнорируются ботом "
+            "(сообщения не сохраняются, Mute, AFK, антипоиск и анонимизация не применяются)."
+        )
+        await call.message.edit_text(text, reply_markup=admin_whitelist_keyboard(items))
+        await call.answer()
+        return
+
     settings = storage.get_global()
     title = ADMIN_SECTION_TITLES.get(section, section)
     await call.message.edit_text(f"<b>{title}</b>", reply_markup=admin_section_keyboard(section, settings))
@@ -650,44 +674,50 @@ async def ad_noop(call: CallbackQuery) -> None:
     await call.answer()
 
 
-@router.callback_query(F.data == "ad:promo:list")
-async def ad_promo_list(call: CallbackQuery, storage: Storage) -> None:
+@router.callback_query(F.data == "ad:wl:add")
+async def ad_wl_add(call: CallbackQuery, storage: Storage) -> None:
     if not storage.is_admin(call.from_user.id):
         await call.answer()
         return
-    promos = storage.promo_list()
-    text = "<b>🎟 Промокоды</b>\n" + ("Список ниже." if promos else "Пока нет ни одного промокода.")
-    await call.message.edit_text(text, reply_markup=promo_list_keyboard(promos))
-    await call.answer()
-
-
-@router.callback_query(F.data == "ad:promo:add")
-async def ad_promo_add(call: CallbackQuery, storage: Storage) -> None:
-    if not storage.is_admin(call.from_user.id):
-        await call.answer()
-        return
-    _pending[call.from_user.id] = {"kind": "promo_create"}
+    _pending[call.from_user.id] = {"kind": "whitelist_add", "created_at": time.time()}
     await call.answer()
     await call.message.answer(
-        "Отправьте одной строкой: <code>тип значение макс_исп срок_дней</code>\n\n"
-        "• тип — <code>discount</code> (скидка в %) или <code>free_days</code> (дней полного доступа)\n"
-        "• макс_исп — сколько раз можно использовать код всего\n"
-        "• срок_дней — через сколько дней код сгорит (0 — бессрочно)\n\n"
-        "Например: <code>free_days 30 5 60</code> — 30 дней доступа, максимум 5 активаций, "
-        "код действует 60 дней.",
+        "Отправьте Telegram ID пользователя или чата, который нужно внести в белый список:\n"
+        "<i>(Также можно отправить ID и через пробел заметку, например: <code>123456789 Имя</code>)</i>"
     )
 
 
-@router.callback_query(F.data.startswith("ad:promo:del:"))
-async def ad_promo_del(call: CallbackQuery, storage: Storage) -> None:
+@router.callback_query(F.data.startswith("ad:wl:del:"))
+async def ad_wl_del(call: CallbackQuery, storage: Storage) -> None:
     if not storage.is_admin(call.from_user.id):
         await call.answer()
         return
-    code = call.data.split(":", 3)[3]
-    storage.promo_delete(code)
-    promos = storage.promo_list()
-    await call.message.edit_reply_markup(reply_markup=promo_list_keyboard(promos))
-    await call.answer("Удалено")
+    target_id = int(call.data.split(":", 3)[3])
+    storage.whitelist_remove(target_id)
+    items = storage.whitelist_all()
+    await call.message.edit_reply_markup(reply_markup=admin_whitelist_keyboard(items))
+    await call.answer(f"ID {target_id} удалён из белого списка")
+
+
+@router.callback_query(F.data.startswith("ad:clean:"))
+async def ad_clean_manual(call: CallbackQuery, storage: Storage) -> None:
+    if not storage.is_admin(call.from_user.id):
+        await call.answer()
+        return
+    action = call.data.split(":", 2)[2]
+    settings = storage.get_global()
+
+    if action == "db":
+        removed = storage.db.purge_messages_older_than(settings.media_max_age_hours)
+        db_lim_removed = storage.db.enforce_db_size_limit(settings.db_max_size_gb)
+        await call.answer(f"✅ БД очищена: {removed + db_lim_removed} записей удалено", show_alert=True)
+    elif action == "media":
+        age_removed = enforce_media_age(MEDIA_DIR, settings.media_max_age_hours)
+        quota_removed = enforce_media_quota(MEDIA_DIR, settings.media_max_total_mb)
+        await call.answer(f"✅ Медиа очищено: {age_removed + quota_removed} файлов удалено", show_alert=True)
+    elif action == "cache":
+        cleared = storage.clear_cache()
+        await call.answer(f"✅ RAM-кэш сброшен: {cleared} записей выгружено", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("ad:user:ban:"))
@@ -888,26 +918,21 @@ async def private_input(message: Message, storage: Storage) -> None:
         await message.answer(f"Отправлено {sent} из {len(rows)}.")
         return
 
-    if kind == "promo_create":
+    if kind == "whitelist_add":
         if not storage.is_admin(user_id):
             _pending.pop(user_id, None)
             return
+        parts = (message.text or "").strip().split(maxsplit=1)
+        if not parts or not parts[0].lstrip("-").isdigit():
+            await message.answer("❌ Введите корректный числовой Telegram ID.")
+            return
+        target_id = int(parts[0])
+        note = parts[1] if len(parts) > 1 else ""
+        storage.whitelist_add(target_id, note)
         _pending.pop(user_id, None)
-        parts = (message.text or "").split()
-        if len(parts) != 4 or parts[0] not in ("discount", "free_days"):
-            await message.answer("❌ Формат: <code>тип значение макс_исп срок_дней</code>. Попробуйте через меню ещё раз.")
-            return
-        promo_kind, value_s, max_uses_s, expires_s = parts
-        try:
-            value = float(value_s)
-            max_uses = int(max_uses_s)
-            expires_days = float(expires_s) or None
-        except ValueError:
-            await message.answer("❌ Значение/макс_исп/срок должны быть числами.")
-            return
-        code = subscription.create_promo(storage, promo_kind, value, max_uses, expires_days)
-        await message.answer(f"✅ Промокод создан: <code>{code}</code>")
+        await message.answer(f"✅ ID <code>{target_id}</code> добавлен в белый список.")
         return
+
 
 
 async def _message_to_preset_item(message: Message) -> dict | None:

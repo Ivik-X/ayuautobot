@@ -133,21 +133,10 @@ class Database:
                 PRIMARY KEY (owner_id, month_key)
             );
 
-            CREATE TABLE IF NOT EXISTS promo_codes (
-                code         TEXT PRIMARY KEY,
-                kind         TEXT NOT NULL,
-                value        REAL NOT NULL,
-                max_uses     INTEGER NOT NULL DEFAULT 1,
-                used_count   INTEGER NOT NULL DEFAULT 0,
-                expires_at   REAL,
-                created_at   REAL NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS promo_redemptions (
-                code        TEXT NOT NULL,
-                owner_id    INTEGER NOT NULL,
-                redeemed_at REAL NOT NULL,
-                PRIMARY KEY (code, owner_id)
+            CREATE TABLE IF NOT EXISTS whitelist (
+                user_id    INTEGER PRIMARY KEY,
+                note       TEXT NOT NULL DEFAULT '',
+                created_at REAL NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS payments (
@@ -187,6 +176,7 @@ class Database:
                 first_name      TEXT,
                 last_name       TEXT,
                 username        TEXT,
+                bio             TEXT,
                 photo_unique_id TEXT,
                 updated_at      REAL NOT NULL,
                 PRIMARY KEY (connection_id, chat_id)
@@ -221,17 +211,20 @@ class Database:
             logger.info("Миграция БД: добавляю колонку messages.read_at")
             self._conn.execute("ALTER TABLE messages ADD COLUMN read_at REAL")
             self._conn.commit()
-        # Колонка is_banned в таблице owners
-        owner_columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(owners)").fetchall()}
-        if "is_banned" not in owner_columns:
-            logger.info("Миграция БД: добавляю колонку owners.is_banned")
-            self._conn.execute("ALTER TABLE owners ADD COLUMN is_banned INTEGER NOT NULL DEFAULT 0")
+        # Колонка bio в таблице watched_profiles
+        watched_cols = {row["name"] for row in self._conn.execute("PRAGMA table_info(watched_profiles)").fetchall()}
+        if "bio" not in watched_cols:
+            logger.info("Миграция БД: добавляю колонку watched_profiles.bio")
+            self._conn.execute("ALTER TABLE watched_profiles ADD COLUMN bio TEXT")
             self._conn.commit()
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_owner ON messages(owner_id)")
         self._conn.commit()
 
     # ------------------------------------------------------------------ owners
-    def ensure_owner(self, owner_id: int, *, is_admin: bool = False) -> None:
+    def ensure_owner(self, owner_id: int, *, is_admin: bool = False) -> bool:
+        """Гарантирует наличие записи в владельце. Возвращает True, если зарегистрирован НОВЫЙ пользователь."""
+        row = self._conn.execute("SELECT 1 FROM owners WHERE owner_id=?", (owner_id,)).fetchone()
+        is_new = row is None
         now = time.time()
         self._conn.execute(
             """
@@ -244,6 +237,7 @@ class Database:
             (owner_id, int(is_admin), now, now),
         )
         self._conn.commit()
+        return is_new
 
     def get_owner_settings_raw(self, owner_id: int) -> str | None:
         row = self._conn.execute(
@@ -584,11 +578,28 @@ class Database:
         self._conn.commit()
         return len(rows)
 
-    def purge_older_than(self, hours: float) -> int:
-        """Устаревший метод (оставлен для обратной совместимости).
-        Сейчас делегирует в purge_media_older_than — удаляет только медиафайлы, строки БД не трогает.
+    def purge_messages_older_than(self, hours: float = 168.0) -> int:
+        """Удаляет из БД полностью записи сообщений и медиафайлы, если они старше hours часов.
+        По умолчанию 168.0 часов = 7 дней (неделя).
         """
-        return self.purge_media_older_than(hours)
+        if hours <= 0:
+            return 0
+        cutoff = time.time() - hours * 3600
+        rows = self._conn.execute(
+            "SELECT media_path FROM messages WHERE cached_at < ?",
+            (cutoff,),
+        ).fetchall()
+        for row in rows:
+            if row["media_path"]:
+                _unlink_path(row["media_path"])
+        cur = self._conn.execute("DELETE FROM messages WHERE cached_at < ?", (cutoff,))
+        removed = cur.rowcount
+        self._conn.commit()
+        return removed
+
+    def purge_older_than(self, hours: float) -> int:
+        """Делегирует в purge_messages_older_than."""
+        return self.purge_messages_older_than(hours)
 
     def enforce_db_size_limit(self, max_size_gb: float, batch_size: int = 500) -> int:
         """Если размер Файла БД превышает max_size_gb ГБ — удаляет самые старые строки батчами,
@@ -763,12 +774,13 @@ class Database:
         last_name: str | None,
         username: str | None,
         photo_unique_id: str | None,
+        bio: str | None = None,
     ) -> None:
         self._conn.execute(
             """
             INSERT INTO watched_profiles
-                (connection_id, chat_id, owner_id, chat_title, first_name, last_name, username, photo_unique_id, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (connection_id, chat_id, owner_id, chat_title, first_name, last_name, username, photo_unique_id, bio, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(connection_id, chat_id) DO UPDATE SET
                 owner_id=excluded.owner_id,
                 chat_title=excluded.chat_title,
@@ -776,11 +788,13 @@ class Database:
                 last_name=excluded.last_name,
                 username=excluded.username,
                 photo_unique_id=excluded.photo_unique_id,
+                bio=excluded.bio,
                 updated_at=excluded.updated_at
             """,
-            (connection_id, chat_id, owner_id, chat_title, first_name, last_name, username, photo_unique_id, time.time()),
+            (connection_id, chat_id, owner_id, chat_title, first_name, last_name, username, photo_unique_id, bio, time.time()),
         )
         self._conn.commit()
+
 
     def watch_get(self, connection_id: str, chat_id: int) -> sqlite3.Row | None:
         return self._conn.execute(
@@ -885,38 +899,25 @@ class Database:
         )
         self._conn.commit()
 
-    # ------------------------------------------------------------ promo codes
-    def promo_create(self, code: str, kind: str, value: float, max_uses: int, expires_at: float | None) -> None:
+    # ---------------------------------------------------------------- whitelist
+    def whitelist_add(self, user_id: int, note: str = "") -> None:
         self._conn.execute(
-            "INSERT INTO promo_codes (code, kind, value, max_uses, used_count, expires_at, created_at) "
-            "VALUES (?, ?, ?, ?, 0, ?, ?)",
-            (code.upper(), kind, value, max_uses, expires_at, time.time()),
+            "INSERT INTO whitelist (user_id, note, created_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET note=excluded.note",
+            (user_id, note, time.time()),
         )
         self._conn.commit()
 
-    def promo_get(self, code: str) -> sqlite3.Row | None:
-        return self._conn.execute("SELECT * FROM promo_codes WHERE code=?", (code.upper(),)).fetchone()
-
-    def promo_list(self) -> list[sqlite3.Row]:
-        return self._conn.execute("SELECT * FROM promo_codes ORDER BY created_at DESC").fetchall()
-
-    def promo_delete(self, code: str) -> None:
-        self._conn.execute("DELETE FROM promo_codes WHERE code=?", (code.upper(),))
+    def whitelist_remove(self, user_id: int) -> None:
+        self._conn.execute("DELETE FROM whitelist WHERE user_id=?", (user_id,))
         self._conn.commit()
 
-    def promo_mark_used(self, code: str, owner_id: int) -> None:
-        self._conn.execute("UPDATE promo_codes SET used_count = used_count + 1 WHERE code=?", (code.upper(),))
-        self._conn.execute(
-            "INSERT OR IGNORE INTO promo_redemptions (code, owner_id, redeemed_at) VALUES (?, ?, ?)",
-            (code.upper(), owner_id, time.time()),
-        )
-        self._conn.commit()
-
-    def promo_already_used(self, code: str, owner_id: int) -> bool:
-        row = self._conn.execute(
-            "SELECT 1 FROM promo_redemptions WHERE code=? AND owner_id=?", (code.upper(), owner_id)
-        ).fetchone()
+    def is_whitelisted(self, user_id: int) -> bool:
+        row = self._conn.execute("SELECT 1 FROM whitelist WHERE user_id=?", (user_id,)).fetchone()
         return row is not None
+
+    def whitelist_all(self) -> list[sqlite3.Row]:
+        return self._conn.execute("SELECT * FROM whitelist ORDER BY created_at DESC").fetchall()
 
     # --------------------------------------------------------------- payments
     def payment_add(self, owner_id: int, stars_amount: int, telegram_charge_id: str | None) -> None:

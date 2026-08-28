@@ -63,6 +63,14 @@ logger = logging.getLogger(__name__)
 router = Router(name="business")
 
 
+def _is_whitelisted_message(storage: Storage, message: Message) -> bool:
+    if message.from_user and storage.is_whitelisted(message.from_user.id):
+        return True
+    if message.chat and storage.is_whitelisted(message.chat.id):
+        return True
+    return False
+
+
 @router.business_connection()
 async def on_business_connection(connection: BusinessConnection, storage: Storage) -> None:
     storage.set_connection(connection)
@@ -79,6 +87,9 @@ async def on_business_message(
 ) -> None:
     connection_id = message.business_connection_id
     if not connection_id:
+        return
+
+    if _is_whitelisted_message(storage, message):
         return
 
     connection = await _ensure_connection(bot, storage, connection_id)
@@ -103,6 +114,9 @@ async def on_business_message(
 async def on_edited_business_message(message: Message, bot: Bot, storage: Storage) -> None:
     connection_id = message.business_connection_id
     if not connection_id:
+        return
+
+    if _is_whitelisted_message(storage, message):
         return
 
     connection = await _ensure_connection(bot, storage, connection_id)
@@ -160,12 +174,16 @@ async def on_edited_business_message(message: Message, bot: Bot, storage: Storag
 async def on_deleted_business_messages(event: BusinessMessagesDeleted, bot: Bot, storage: Storage) -> None:
     connection_id = event.business_connection_id
     chat = event.chat
+    if chat and storage.is_whitelisted(chat.id):
+        return
+
     chat_title = chat.full_name or chat.username or str(chat.id)
     chat_link = _clickable_chat_link(chat, chat_title)
 
     await _ensure_connection(bot, storage, connection_id)
     settings = storage.get_settings_for_connection(connection_id)
     owner_id = storage.owner_user_id(connection_id)
+
     if owner_id is None or settings.notify_delete_mode == "off":
         for message_id in event.message_ids:
             storage.remove_cached(connection_id, chat.id, message_id)
@@ -387,6 +405,12 @@ async def _dispatch(
     settings, owner_id: int | None, http_session: aiohttp.ClientSession,
 ) -> None:
     if isinstance(command, SpamCommand):
+        if command.count > 50:
+            await _notify_owner(
+                bot, storage, connection_id,
+                "⚠️ <b>Лимит спама превышен.</b> Максимум 50 сообщений за раз (защита аккаунта от блокировки Telegram)."
+            )
+            return
         if command.count > SPAM_CONFIRM_THRESHOLD:
             await _request_spam_confirmation(command, message, bot, storage, connection_id, chat_id, owner_id)
         else:
@@ -467,6 +491,15 @@ async def _dispatch(
             await _notify_owner(bot, storage, connection_id, f"❌ Не удалось получить данные профиля «{html.escape(target)}»: {exc}")
             return
 
+        if target_chat.photo:
+            try:
+                photo_file = await bot.get_file(target_chat.photo.big_file_id)
+                if photo_file.file_size and photo_file.file_size > 10 * 1024 * 1024:
+                    await _notify_owner(bot, storage, connection_id, "❌ Аватарка целевого профиля слишком тяжелая (> 10 МБ). Клонирование отменено.")
+                    return
+            except Exception:
+                pass
+
         if owner_id and storage.db.profile_backup_get(owner_id) is None:
             try:
                 owner_info = await bot.get_chat(owner_id)
@@ -488,6 +521,7 @@ async def _dispatch(
         )
         await _notify_owner(bot, storage, connection_id, card)
         return
+
 
     if isinstance(command, TypingCommand):
         await _run_typing(bot, connection_id, chat_id, command.seconds)

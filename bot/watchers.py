@@ -47,10 +47,12 @@ async def _check_one(bot: Bot, storage: Storage, row) -> None:
     new_first = chat.first_name or ""
     new_last = chat.last_name or ""
     new_username = chat.username or ""
+    new_bio = chat.bio or ""
 
     old_first = row["first_name"] or ""
     old_last = row["last_name"] or ""
     old_username = row["username"] or ""
+    old_bio = (dict(row).get("bio") or "") if row else ""
     old_photo = row["photo_unique_id"]
 
     changes: list[str] = []
@@ -60,6 +62,8 @@ async def _check_one(bot: Bot, storage: Storage, row) -> None:
         changes.append(f"Фамилия: «{old_last or '—'}» → «{new_last or '—'}»")
     if new_username != old_username:
         changes.append(f"Username: «@{old_username}» → «@{new_username}»" if (old_username or new_username) else "")
+    if new_bio != old_bio:
+        changes.append(f"Описание (bio): «{old_bio or '—'}» → «{new_bio or '—'}»")
     if photo_unique_id != old_photo:
         changes.append("Изменилось фото профиля")
     changes = [c for c in changes if c]
@@ -71,8 +75,10 @@ async def _check_one(bot: Bot, storage: Storage, row) -> None:
             "last_name": chat.last_name,
             "username": chat.username,
             "photo_unique_id": photo_unique_id,
+            "bio": new_bio,
         },
     )
+
 
     if not changes:
         return

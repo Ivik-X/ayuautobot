@@ -87,7 +87,8 @@ def format_admin_overview(
     total_stars: int = 0,
     db_max_size_gb: float = 20.0,
     media_max_total_mb: int = 7168,
-    media_max_age_hours: float = 48.0,
+    media_max_age_hours: float = 168.0,
+
     media_max_file_mb: int = 50,
     active_users_48h: int = 0,
     msgs_48h: int = 0,
@@ -103,7 +104,8 @@ def format_admin_overview(
         last_backup = f"{ago_min} мин. назад"
 
     db_usage_pct = (db_size_mb / 1024 / db_max_size_gb * 100) if db_max_size_gb > 0 else 0
-    media_usage_pct = (media_mb / (media_max_total_mb / 1024) * 100) if media_max_total_mb > 0 else 0
+    media_usage_pct = (media_mb / media_max_total_mb * 100) if media_max_total_mb > 0 else 0
+
 
     return (
         "<b>🛠 Панель администратора</b>\n\n"

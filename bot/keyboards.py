@@ -200,7 +200,7 @@ def admin_main_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="💾 Данные", callback_data="ad:open:data"),
             InlineKeyboardButton(text="👥 Пользователи", callback_data="ad:open:users"),
         ],
-        [InlineKeyboardButton(text="🎟 Промокоды", callback_data="ad:promo:list")],
+        [InlineKeyboardButton(text="⚪️ Белый список (Whitelist)", callback_data="ad:open:whitelist")],
         [
             InlineKeyboardButton(text="📤 Сделать бэкап сейчас", callback_data="ad:backupnow"),
             InlineKeyboardButton(text="📥 Загрузить бэкап", callback_data="ad:restore"),
@@ -235,7 +235,6 @@ def admin_users_keyboard(owners: list[dict]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-
 def admin_section_keyboard(section: str, settings: GlobalSettings) -> InlineKeyboardMarkup:
     fields = ADMIN_SECTION_FIELDS[section]
     rows: list[list[InlineKeyboardButton]] = []
@@ -249,6 +248,12 @@ def admin_section_keyboard(section: str, settings: GlobalSettings) -> InlineKeyb
             text = f"{f.label}: {value}"
             cb = f"ad:edit:{section}:{f.key}"
         rows.append([InlineKeyboardButton(text=text, callback_data=cb)])
+
+    if section == "cache":
+        rows.append([InlineKeyboardButton(text="🧹 Очистить БД (> 7 дней)", callback_data="ad:clean:db")])
+        rows.append([InlineKeyboardButton(text="🗑 Очистить медиа (> 7 дней)", callback_data="ad:clean:media")])
+        rows.append([InlineKeyboardButton(text="📥 Сбросить RAM-кэш", callback_data="ad:clean:cache")])
+
     rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="ad:back")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -261,25 +266,22 @@ def admin_cancel_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="ad:cancel")]])
 
 
-def promo_list_keyboard(promos: list) -> InlineKeyboardMarkup:
+def admin_whitelist_keyboard(whitelist_rows: list) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
-    for p in promos:
-        used = f"{p['used_count']}/{p['max_uses']}"
-        exp = ""
-        if p["expires_at"]:
-            import time as _t
-            days_left = max(0, int((p["expires_at"] - _t.time()) / 86400))
-            exp = f", осталось {days_left}d"
-        label = f"🎟 {p['code']} ({p['kind']}={p['value']:g}, {used}{exp})"
+    for r in whitelist_rows:
+        uid = r["user_id"]
+        note = f" ({r['note']})" if r["note"] else ""
+        label = f"⚪️ {uid}{note}"
         rows.append(
             [
                 InlineKeyboardButton(text=label, callback_data="ad:noop"),
-                InlineKeyboardButton(text="🗑", callback_data=f"ad:promo:del:{p['code']}"),
+                InlineKeyboardButton(text="🗑 Удалить", callback_data=f"ad:wl:del:{uid}"),
             ]
         )
-    rows.append([InlineKeyboardButton(text="➕ Новый промокод", callback_data="ad:promo:add")])
+    rows.append([InlineKeyboardButton(text="➕ Добавить ID", callback_data="ad:wl:add")])
     rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="ad:back")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
 
 
 # -------------------------------------------------------------------- /help

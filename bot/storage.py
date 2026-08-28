@@ -371,8 +371,11 @@ class Storage:
     def watch_upsert(self, connection_id: str, chat_id: int, owner_id: int, chat_title: str, snapshot: dict) -> None:
         self._db.watch_upsert(
             connection_id, chat_id, owner_id, chat_title,
-            snapshot.get("first_name"), snapshot.get("last_name"),
-            snapshot.get("username"), snapshot.get("photo_unique_id"),
+            snapshot.get("first_name"),
+            snapshot.get("last_name"),
+            snapshot.get("username"),
+            snapshot.get("photo_unique_id"),
+            snapshot.get("bio"),
         )
 
     def watch_get(self, connection_id: str, chat_id: int):
@@ -459,23 +462,24 @@ class Storage:
     def usage_increment(self, owner_id: int, month_key: str, field: str, amount: int) -> None:
         self._db.usage_increment(owner_id, month_key, field, amount)
 
-    def promo_create(self, code: str, kind: str, value: float, max_uses: int, expires_at: float | None) -> None:
-        self._db.promo_create(code, kind, value, max_uses, expires_at)
+    # ---------------------------------------------------------------- whitelist
+    def whitelist_add(self, user_id: int, note: str = "") -> None:
+        self._db.whitelist_add(user_id, note)
 
-    def promo_get(self, code: str):
-        return self._db.promo_get(code)
+    def whitelist_remove(self, user_id: int) -> None:
+        self._db.whitelist_remove(user_id)
 
-    def promo_list(self):
-        return self._db.promo_list()
+    def is_whitelisted(self, user_id: int) -> bool:
+        return self._db.is_whitelisted(user_id)
 
-    def promo_delete(self, code: str) -> None:
-        self._db.promo_delete(code)
+    def whitelist_all(self):
+        return self._db.whitelist_all()
 
-    def promo_mark_used(self, code: str, owner_id: int) -> None:
-        self._db.promo_mark_used(code, owner_id)
+    def clear_cache(self) -> int:
+        count = len(self._cache)
+        self._cache.clear()
+        return count
 
-    def promo_already_used(self, code: str, owner_id: int) -> bool:
-        return self._db.promo_already_used(code, owner_id)
 
     def payment_add(self, owner_id: int, stars_amount: int, telegram_charge_id: str | None) -> None:
         self._db.payment_add(owner_id, stars_amount, telegram_charge_id)

@@ -57,8 +57,19 @@ async def main() -> None:
         db.ensure_owner(admin_id, is_admin=True)
 
     bot = Bot(token=config.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    try:
+        from aiogram.types import BotCommand
+        await bot.set_my_commands([
+            BotCommand(command="menu", description="📱 Главное меню"),
+            BotCommand(command="ghost", description="👻 Режим призрака"),
+            BotCommand(command="help", description="📖 Справочник по командам"),
+        ])
+    except Exception:
+        logger.warning("Не удалось установить команды бота в Telegram UI", exc_info=True)
+
     http_session = aiohttp.ClientSession()
     backup_manager = BackupManager(bot, storage, config.admin_ids)
+
 
     dp = Dispatcher()
     dp["storage"] = storage
