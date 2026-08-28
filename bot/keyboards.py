@@ -290,7 +290,11 @@ HELP_TOPICS: list[tuple[str, str]] = [
     ("cmd_troll", "🤪 .troll"),
     ("cmd_del", "🗑 .del"),
     ("cmd_clone", "🎭 .clone"),
+    ("cmd_tonote", "⭕️ .tonote"),
+    ("cmd_tovoice", "🎤 .tovoice"),
+    ("cmd_chatstat", "📊 .chatstat"),
     ("cmd_mute", "🔇 .mute / .unmute"),
+
     ("cmd_typing", "⌨️ .typing"),
     ("cmd_mock", "🔤 .mock"),
     ("cmd_reverse", "🔁 .reverse"),

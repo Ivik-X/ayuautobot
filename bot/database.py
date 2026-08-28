@@ -304,6 +304,46 @@ class Database:
             "deletes": int(deletes),
         }
 
+    def get_chat_stats_7d(self, connection_id: str, chat_id: int) -> dict:
+        cutoff = time.time() - (7 * 86400)
+        rows = self._conn.execute(
+            """
+            SELECT kind, media_kind, edited_at, deleted_at, cached_at
+            FROM messages
+            WHERE connection_id = ? AND chat_id = ? AND cached_at >= ?
+            """,
+            (connection_id, chat_id, cutoff),
+        ).fetchall()
+
+        total = len(rows)
+        if total == 0:
+            return {"total": 0}
+
+        edits = sum(1 for r in rows if r["edited_at"] is not None)
+        deletes = sum(1 for r in rows if r["deleted_at"] is not None)
+
+        kinds: dict[str, int] = {}
+        hours = [0] * 24
+
+        import datetime
+        for r in rows:
+            k = r["media_kind"] or r["kind"] or "text"
+            kinds[k] = kinds.get(k, 0) + 1
+            if r["cached_at"]:
+                h = datetime.datetime.fromtimestamp(r["cached_at"]).hour
+                hours[h] += 1
+
+        peak_h = max(range(24), key=lambda i: hours[i]) if any(hours) else 12
+
+        return {
+            "total": total,
+            "edits": edits,
+            "deletes": deletes,
+            "kinds": kinds,
+            "peak_hour": peak_h,
+        }
+
+
     def all_owners_with_stats_48h(self, cutoff_ts: float) -> list[dict]:
         """Returns owners with resource usage statistics over the last 48 hours."""
         rows = self._conn.execute(

@@ -20,8 +20,11 @@ from aiogram.types import (
     Message,
 )
 
+import contextlib
+
 from bot import subscription
 from bot.commands import (
+    ChatStatCommand,
     CloneCommand,
     DelCommand,
     MuteCommand,
@@ -31,6 +34,8 @@ from bot.commands import (
     SimpleCommand,
     SpamCommand,
     TextTransformCommand,
+    ToNoteCommand,
+    ToVoiceCommand,
     TranslateCommand,
     TrollCommand,
     TypingCommand,
@@ -183,6 +188,19 @@ async def on_deleted_business_messages(event: BusinessMessagesDeleted, bot: Bot,
     await _ensure_connection(bot, storage, connection_id)
     settings = storage.get_settings_for_connection(connection_id)
     owner_id = storage.owner_user_id(connection_id)
+
+    if len(event.message_ids) >= 5 and owner_id is not None:
+        alert_text = (
+            f"🚨 <b>Собеседник очистил историю диалога!</b>\n"
+            f"Чат: {chat_link}\n"
+            f"Удалено сообщений: <b>{len(event.message_ids)}</b>\n\n"
+            f"💡 <i>Вся сохранённая история за 7 дней остаётся в базе данных бота.\n"
+            f"Вы можете выгрузить её через меню: /menu → 📤 Экспорт истории.</i>"
+        )
+        try:
+            await _notify_owner(bot, storage, connection_id, alert_text)
+        except Exception:
+            pass
 
     if owner_id is None or settings.notify_delete_mode == "off":
         for message_id in event.message_ids:
@@ -349,6 +367,9 @@ _COMMAND_NAMES = {
     ViewCommand: "view",
     WatchCommand: "watch",
     UnwatchCommand: "unwatch",
+    ToNoteCommand: "tonote",
+    ToVoiceCommand: "tovoice",
+    ChatStatCommand: "chatstat",
 }
 
 
@@ -520,6 +541,101 @@ async def _dispatch(
             f"Вернуть исходный профиль: <code>.clone restore</code>"
         )
         await _notify_owner(bot, storage, connection_id, card)
+        return
+
+    if isinstance(command, ToNoteCommand):
+        reply = message.reply_to_message
+        if reply is None:
+            await _notify_owner(bot, storage, connection_id, "❌ Отправьте <code>.tonote</code> в ответ на медиасообщение.")
+            return
+        media = extract_media(reply)
+        if media is None:
+            await _notify_owner(bot, storage, connection_id, "❌ В отвеченном сообщении не найдено медиафайла.")
+            return
+        data = await download_bytes(bot, media.file_id)
+        if not data:
+            await _notify_owner(bot, storage, connection_id, "❌ Не удалось скачать медиафайл.")
+            return
+        try:
+            await bot.send_video_note(
+                chat_id=chat_id,
+                video_note=BufferedInputFile(data, filename="note.mp4"),
+                business_connection_id=connection_id,
+            )
+            with contextlib.suppress(Exception):
+                await bot.delete_business_messages(business_connection_id=connection_id, message_ids=[message.message_id])
+        except Exception as exc:
+            await _notify_owner(bot, storage, connection_id, f"❌ Ошибка отправки кружка: {exc}")
+        return
+
+    if isinstance(command, ToVoiceCommand):
+        reply = message.reply_to_message
+        if reply is None:
+            await _notify_owner(bot, storage, connection_id, "❌ Отправьте <code>.tovoice</code> в ответ на аудио/видео.")
+            return
+        media = extract_media(reply)
+        if media is None:
+            await _notify_owner(bot, storage, connection_id, "❌ В отвеченном сообщении не найдено медиафайла.")
+            return
+        data = await download_bytes(bot, media.file_id)
+        if not data:
+            await _notify_owner(bot, storage, connection_id, "❌ Не удалось скачать файл.")
+            return
+        try:
+            await bot.send_voice(
+                chat_id=chat_id,
+                voice=BufferedInputFile(data, filename="voice.ogg"),
+                business_connection_id=connection_id,
+            )
+            with contextlib.suppress(Exception):
+                await bot.delete_business_messages(business_connection_id=connection_id, message_ids=[message.message_id])
+        except Exception as exc:
+            await _notify_owner(bot, storage, connection_id, f"❌ Ошибка отправки ГС: {exc}")
+        return
+
+    if isinstance(command, ChatStatCommand):
+        stats = storage.get_chat_stats_7d(connection_id, chat_id)
+        if not stats or stats.get("total", 0) == 0:
+            text = "📊 <b>Статистика чата за 7 дней</b>\n\n<i>В базе нет сохранённых сообщений по этому чату.</i>"
+        else:
+            total = stats["total"]
+            edits = stats["edits"]
+            deletes = stats["deletes"]
+            kinds = stats["kinds"]
+            peak_h = stats["peak_hour"]
+
+            kind_labels = {
+                "text": "📝 Текстовые",
+                "voice": "🎤 Голосовые (ГС)",
+                "video_note": "⭕️ Кружки",
+                "photo": "📷 Фотографии",
+                "video": "🎬 Видеозаписи",
+                "audio": "🎵 Аудиозаписи",
+                "sticker": "🙂 Стикеры",
+                "animation": "🎞 GIF-анимации",
+                "document": "📎 Файлы и документы",
+            }
+            breakdown_lines = []
+            for k, cnt in sorted(kinds.items(), key=lambda item: item[1], reverse=True):
+                lbl = kind_labels.get(k, f"📦 {k}")
+                pct = int(cnt / total * 100)
+                breakdown_lines.append(f"• {lbl}: <b>{cnt}</b> ({pct}%)")
+
+            text = (
+                f"📊 <b>Подробная статистика чата за 7 дней</b>\n"
+                f"Чат ID: <code>{chat_id}</code>\n\n"
+                f"💬 <b>Всего сообщений в базе:</b> <b>{total}</b>\n\n"
+                f"<b>📦 Содержимое сообщений:</b>\n" + "\n".join(breakdown_lines) + "\n\n"
+                f"✏️ <b>Правок:</b> <b>{edits}</b> · 🗑 <b>Удалений:</b> <b>{deletes}</b>\n"
+                f"⏰ <b>Пик активности:</b> <b>{peak_h:02d}:00 – {peak_h+1:02d}:00</b>"
+            )
+
+        try:
+            await bot.send_message(chat_id=chat_id, text=text, business_connection_id=connection_id)
+            with contextlib.suppress(Exception):
+                await bot.delete_business_messages(business_connection_id=connection_id, message_ids=[message.message_id])
+        except Exception:
+            await _notify_owner(bot, storage, connection_id, text)
         return
 
 

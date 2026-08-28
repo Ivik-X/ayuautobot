@@ -84,6 +84,21 @@ class CloneCommand:
 
 
 @dataclass(frozen=True, slots=True)
+class ToNoteCommand:
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class ToVoiceCommand:
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class ChatStatCommand:
+    pass
+
+
+@dataclass(frozen=True, slots=True)
 class SimpleCommand:
     name: str  # id | ping
 
@@ -104,6 +119,9 @@ Command = (
     | TrollCommand
     | DelCommand
     | CloneCommand
+    | ToNoteCommand
+    | ToVoiceCommand
+    | ChatStatCommand
     | SimpleCommand
 )
 
@@ -111,6 +129,9 @@ _SPAM_RE = re.compile(r"^\.spam\s+(\d+)(?:\s+(.+))?$", re.DOTALL | re.IGNORECASE
 _TROLL_RE = re.compile(r"^\.troll(?:\s+(\d+))?$", re.IGNORECASE)
 _DEL_RE = re.compile(r"^\.del\s+(\d+)$", re.IGNORECASE)
 _CLONE_RE = re.compile(r"^\.clone\s+(\S+)$", re.IGNORECASE)
+_TONOTE_RE = re.compile(r"^\.tonote$", re.IGNORECASE)
+_TOVOICE_RE = re.compile(r"^\.tovoice$", re.IGNORECASE)
+_CHATSTAT_RE = re.compile(r"^\.(?:chatstat|stats)$", re.IGNORECASE)
 _MUTE_RE = re.compile(r"^\.mute(?:\s+(\d+))?$", re.IGNORECASE)
 _UNMUTE_RE = re.compile(r"^\.unmute$", re.IGNORECASE)
 _TYPING_RE = re.compile(r"^\.typing\s+(\d+)$", re.IGNORECASE)
@@ -126,6 +147,7 @@ _WATCH_RE = re.compile(r"^\.watch$", re.IGNORECASE)
 _UNWATCH_RE = re.compile(r"^\.unwatch$", re.IGNORECASE)
 
 _SIMPLE = {"id": "id", "ping": "ping"}
+
 
 
 def parse_command(text: str | None) -> Command | None:
@@ -164,6 +186,16 @@ def parse_command(text: str | None) -> Command | None:
 
     if match := _CLONE_RE.match(text):
         return CloneCommand(target=match.group(1).strip())
+
+    if _TONOTE_RE.match(text):
+        return ToNoteCommand()
+
+    if _TOVOICE_RE.match(text):
+        return ToVoiceCommand()
+
+    if _CHATSTAT_RE.match(text):
+        return ChatStatCommand()
+
 
     if match := _TYPING_RE.match(text):
         seconds = min(int(match.group(1)), 30)
