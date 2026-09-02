@@ -1,6 +1,14 @@
 from __future__ import annotations
 
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
+
+
+def persistent_menu_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="📱 Меню")]],
+        resize_keyboard=True,
+    )
+
 
 from bot.settings import (
     ADMIN_BACKUP_FIELDS,
@@ -44,11 +52,15 @@ def menu_keyboard() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(text="💬 Последние сообщения", callback_data="us:recent"),
+            InlineKeyboardButton(text="🔍 Поиск по базе", callback_data="us:search"),
+        ],
+        [
             InlineKeyboardButton(text="📤 Экспорт истории", callback_data="us:export"),
         ],
         [InlineKeyboardButton(text="✖️ Закрыть", callback_data="us:close")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
 
 
 def notifications_keyboard(settings: OwnerSettings, digest_count: int) -> InlineKeyboardMarkup:

@@ -31,6 +31,7 @@ class OwnerSettings:
     anon_stickers: bool = False             # пересылать стикеры как картинку без ссылки на стикерпак
     anti_search: bool = False               # подменять буквы на визуальные twin-символы (антипоиск)
     ghost_mode_enabled: bool = False        # разрешить управление чатами через /ghost (себе и привязанным операторам)
+    murino_mode: bool = False               # автоматически переводить исходящие сообщения на муринский
 
     # Команды (включение/выключение целиком)
     cmd_spam: bool = True
@@ -46,6 +47,12 @@ class OwnerSettings:
     cmd_say: bool = True
     cmd_view: bool = True
     cmd_watch: bool = True
+    cmd_del: bool = True
+    cmd_troll: bool = True
+    cmd_clone: bool = True
+    cmd_tonote: bool = True
+    cmd_tovoice: bool = True
+    cmd_chatstat: bool = True
 
     # Прочее
     cache_ttl_hours: float = 24
@@ -85,6 +92,13 @@ COMMAND_FLAG = {
     "view": "cmd_view",
     "watch": "cmd_watch",
     "unwatch": "cmd_watch",
+    "del": "cmd_del",
+    "troll": "cmd_troll",
+    "clone": "cmd_clone",
+    "tonote": "cmd_tonote",
+    "tovoice": "cmd_tovoice",
+    "chatstat": "cmd_chatstat",
+    "stats": "cmd_chatstat",
 }
 
 
@@ -107,14 +121,17 @@ EXTRA_FIELDS: list[SettingField] = [
     SettingField("afk_enabled", "💤 Режим AFK (автоответ)", "bool"),
     SettingField("anon_stickers", "🎭 Анонимные стикеры", "bool"),
     SettingField("anti_search", "🕵️ Антипоиск (подмена букв)", "bool"),
+    SettingField("murino_mode", "🐱 Муринский язык", "bool"),
 ]
 
 COMMAND_FIELDS: list[SettingField] = [
     SettingField("cmd_spam", ".spam", "bool"),
     SettingField("cmd_mute", ".mute / .unmute", "bool"),
     SettingField("cmd_typing", ".typing", "bool"),
+    SettingField("cmd_del", ".del", "bool"),
     SettingField("cmd_mock", ".mock", "bool"),
     SettingField("cmd_reverse", ".reverse", "bool"),
+    SettingField("cmd_troll", ".troll", "bool"),
     SettingField("cmd_tr", ".tr", "bool"),
     SettingField("cmd_qr", ".qr", "bool"),
     SettingField("cmd_short", ".short", "bool"),
@@ -123,6 +140,10 @@ COMMAND_FIELDS: list[SettingField] = [
     SettingField("cmd_say", ".say", "bool"),
     SettingField("cmd_view", ".view", "bool"),
     SettingField("cmd_watch", ".watch / .unwatch", "bool"),
+    SettingField("cmd_clone", ".clone", "bool"),
+    SettingField("cmd_tonote", ".tonote", "bool"),
+    SettingField("cmd_tovoice", ".tovoice", "bool"),
+    SettingField("cmd_chatstat", ".chatstat / .stats", "bool"),
 ]
 
 MISC_FIELDS: list[SettingField] = [
@@ -153,14 +174,16 @@ class GlobalSettings:
     cache_cleanup_interval_min: int = 10
 
     # Медиафайлы на диске (data/media/)
-    media_max_total_mb: int = 7168          # квота на суммарный объём медиа (МБ, дефолт 7 ГБ)
+    media_max_total_mb: int = 10240         # квота на суммарный объём медиа (МБ, 10 ГБ)
+    media_reserve_gb: float = 2.0           # резерв: не заполнять медиа выше лимита - резерв
     media_max_age_hours: float = 168.0      # TTL медиафайлов: старше этого (7 дней) — удалять при очистке
     media_max_file_mb: int = 50             # файлы тяжелее этого — не скачивать вообще
 
     # БД
-    db_max_size_gb: float = 20.0            # лимит размера БД: при превышении удаляются самые старые строки
+    db_max_size_gb: float = 10.0            # лимит размера БД: при превышении удаляются самые старые строки
+    db_reserve_gb: float = 2.0              # резерв: чистить старые записи, оставляя резерв свободным
 
-    min_free_disk_gb: float = 5.0  # если свободного места на диске меньше — аварийная очистка
+    min_free_disk_gb: float = 2.0  # если свободного места на диске меньше — аварийная очистка
     profile_watch_interval_min: int = 720  # как часто опрашивать watch-листы (12 часов)
 
 
@@ -208,11 +231,14 @@ ADMIN_CACHE_FIELDS: list[SettingField] = [
     SettingField("cache_max_entries", "📥 Макс. записей в RAM-кэше", "int"),
     SettingField("cache_cleanup_interval_min", "🧹 Интервал очистки кэша (мин)", "int"),
     SettingField("media_max_total_mb", "🖼 Квота медиа на диске (МБ)", "int"),
+    SettingField("media_reserve_gb", "🛡 Резерв медиа (ГБ, чистить до лимита-резерв)", "float"),
     SettingField("media_max_age_hours", "⏰ TTL медиафайлов (часы)", "float"),
     SettingField("media_max_file_mb", "📦 Макс. размер одного файла (МБ)", "int"),
     SettingField("db_max_size_gb", "💾 Лимит размера БД (ГБ)", "float"),
+    SettingField("db_reserve_gb", "🛡 Резерв БД (ГБ, чистить до лимита-резерв)", "float"),
     SettingField("profile_watch_interval_min", "👁 Интервал опроса watch-листа (мин)", "int"),
 ]
+
 
 ADMIN_DATA_FIELDS: list[SettingField] = [
     SettingField("min_free_disk_gb", "💾 Мин. свободно на диске (ГБ) до аварийной очистки", "float"),

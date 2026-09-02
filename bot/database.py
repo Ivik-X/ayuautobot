@@ -73,6 +73,7 @@ class Database:
                 deleted_at    REAL,
                 bot_caused    INTEGER NOT NULL DEFAULT 0,
                 read_at       REAL,
+                edit_history  TEXT NOT NULL DEFAULT '[]',
                 PRIMARY KEY (connection_id, chat_id, message_id)
             );
 
@@ -211,6 +212,10 @@ class Database:
             logger.info("Миграция БД: добавляю колонку messages.read_at")
             self._conn.execute("ALTER TABLE messages ADD COLUMN read_at REAL")
             self._conn.commit()
+        if "edit_history" not in columns:
+            logger.info("Миграция БД: добавляю колонку messages.edit_history")
+            self._conn.execute("ALTER TABLE messages ADD COLUMN edit_history TEXT NOT NULL DEFAULT '[]'")
+            self._conn.commit()
         # Колонка bio в таблице watched_profiles
         watched_cols = {row["name"] for row in self._conn.execute("PRAGMA table_info(watched_profiles)").fetchall()}
         if "bio" not in watched_cols:
@@ -308,7 +313,7 @@ class Database:
         cutoff = time.time() - (7 * 86400)
         rows = self._conn.execute(
             """
-            SELECT kind, media_kind, edited_at, deleted_at, cached_at
+            SELECT kind, media_kind, edited_at, deleted_at, cached_at, owner_id, from_user_id
             FROM messages
             WHERE connection_id = ? AND chat_id = ? AND cached_at >= ?
             """,
@@ -324,6 +329,8 @@ class Database:
 
         kinds: dict[str, int] = {}
         hours = [0] * 24
+        owner_msgs = 0
+        partner_msgs = 0
 
         import datetime
         for r in rows:
@@ -332,6 +339,11 @@ class Database:
             if r["cached_at"]:
                 h = datetime.datetime.fromtimestamp(r["cached_at"]).hour
                 hours[h] += 1
+            # Считаем: owner_id совпадает с from_user_id → владелец отправил
+            if r["owner_id"] and r["from_user_id"] and r["owner_id"] == r["from_user_id"]:
+                owner_msgs += 1
+            else:
+                partner_msgs += 1
 
         peak_h = max(range(24), key=lambda i: hours[i]) if any(hours) else 12
 
@@ -341,7 +353,11 @@ class Database:
             "deletes": deletes,
             "kinds": kinds,
             "peak_hour": peak_h,
+            "hours": hours,
+            "owner_msgs": owner_msgs,
+            "partner_msgs": partner_msgs,
         }
+
 
 
     def all_owners_with_stats_48h(self, cutoff_ts: float) -> list[dict]:
@@ -439,13 +455,28 @@ class Database:
         media_file_id = cached.media.file_id if cached.media else None
         media_path = str(cached.media.local_path) if cached.media and cached.media.local_path else None
 
+        edit_history_json = '[]'
+        if not is_new:
+            old_row = self._conn.execute(
+                "SELECT content, cached_at, edited_at, edit_history FROM messages WHERE connection_id=? AND chat_id=? AND message_id=?",
+                (cached.connection_id, cached.chat_id, cached.message_id),
+            ).fetchone()
+            if old_row:
+                try:
+                    history = json.loads(old_row["edit_history"] or "[]")
+                except Exception:
+                    history = []
+                if old_row["content"] != cached.content:
+                    history.append({"content": old_row["content"], "ts": old_row["edited_at"] or old_row["cached_at"]})
+                edit_history_json = json.dumps(history, ensure_ascii=False)
+
         self._conn.execute(
             """
             INSERT INTO messages (
                 connection_id, chat_id, message_id, owner_id, chat_title,
                 from_user_id, from_user_name, content, kind, flags,
-                media_kind, media_file_id, media_path, cached_at, edited_at, deleted_at, bot_caused
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)
+                media_kind, media_file_id, media_path, cached_at, edited_at, deleted_at, bot_caused, edit_history
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)
             ON CONFLICT(connection_id, chat_id, message_id) DO UPDATE SET
                 from_user_name=excluded.from_user_name,
                 content=excluded.content,
@@ -454,15 +485,17 @@ class Database:
                 media_kind=excluded.media_kind,
                 media_file_id=excluded.media_file_id,
                 media_path=excluded.media_path,
-                edited_at=?
+                edited_at=?,
+                edit_history=?
             """,
             (
                 cached.connection_id, cached.chat_id, cached.message_id, owner_id, chat_title,
                 cached.from_user_id, cached.from_user_name, cached.content, cached.kind, flags_json,
-                media_kind, media_file_id, media_path, cached.cached_at, int(bot_caused),
-                time.time(),
+                media_kind, media_file_id, media_path, cached.cached_at, int(bot_caused), edit_history_json,
+                time.time(), edit_history_json,
             ),
         )
+
 
         if is_new:
             self._conn.execute(
@@ -506,6 +539,19 @@ class Database:
             (connection_id, message_id),
         ).fetchone()
         return self._row_to_cached(row) if row else None
+
+    def get_edit_history(self, connection_id: str, chat_id: int, message_id: int) -> list[dict]:
+        row = self._conn.execute(
+            "SELECT edit_history FROM messages WHERE connection_id=? AND chat_id=? AND message_id=?",
+            (connection_id, chat_id, message_id),
+        ).fetchone()
+        if not row or not row["edit_history"]:
+            return []
+        try:
+            return json.loads(row["edit_history"])
+        except Exception:
+            return []
+
 
     def mark_deleted(self, connection_id: str, chat_id: int, message_id: int) -> CachedMessage | None:
         cached = self.get_message(connection_id, chat_id, message_id)
@@ -637,9 +683,23 @@ class Database:
         self._conn.commit()
         return removed
 
+    def search_messages(self, owner_id: int, query: str, limit: int = 15) -> list[sqlite3.Row]:
+        pattern = f"%{query.strip()}%"
+        return self._conn.execute(
+            """
+            SELECT connection_id, chat_id, chat_title, message_id, from_user_name, content, cached_at, media_kind, deleted_at, edited_at
+            FROM messages
+            WHERE owner_id = ? AND content LIKE ?
+            ORDER BY cached_at DESC
+            LIMIT ?
+            """,
+            (owner_id, pattern, limit),
+        ).fetchall()
+
     def purge_older_than(self, hours: float) -> int:
         """Делегирует в purge_messages_older_than."""
         return self.purge_messages_older_than(hours)
+
 
     def enforce_db_size_limit(self, max_size_gb: float, batch_size: int = 500) -> int:
         """Если размер Файла БД превышает max_size_gb ГБ — удаляет самые старые строки батчами,

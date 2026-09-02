@@ -30,6 +30,7 @@ from bot.keyboards import (
     help_topics_keyboard,
     menu_keyboard,
     notifications_keyboard,
+    persistent_menu_keyboard,
     preset_creation_keyboard,
     presets_keyboard,
     recent_count_keyboard,
@@ -82,7 +83,7 @@ async def cmd_start(message: Message, storage: Storage, texts: Texts) -> None:
     me = await message.bot.get_me()
     username = f"@{me.username}" if me.username else "имя бота из его профиля"
     text = texts.start.replace("{admin_hint}", "").replace("{bot_username}", username)
-    await message.answer(text)
+    await message.answer(text, reply_markup=persistent_menu_keyboard())
 
 
 # ------------------------------------------------------------------------- /help
@@ -113,6 +114,7 @@ async def help_close(call: CallbackQuery) -> None:
 
 
 # ---------------------------------------------------------------------- /menu
+@router.message(F.text == "📱 Меню")
 @router.message(Command("menu"))
 async def cmd_menu(message: Message, storage: Storage) -> None:
     owner_id = message.from_user.id
@@ -128,6 +130,7 @@ async def cmd_menu(message: Message, storage: Storage) -> None:
         "Выберите необходимый раздел:"
     )
     await message.answer(text, reply_markup=menu_keyboard())
+
 
 
 @router.callback_query(F.data == "us:close")
@@ -337,7 +340,20 @@ async def us_export_chat(call: CallbackQuery, storage: Storage) -> None:
         )
 
 
+@router.callback_query(F.data == "us:search")
+async def us_search(call: CallbackQuery) -> None:
+    owner_id = call.from_user.id
+    _pending[owner_id] = {"kind": "db_search", "created_at": time.time()}
+    await call.answer()
+    await call.message.answer(
+        "🔍 <b>Поиск по сохранённой базе сообщений</b>\n\n"
+        "Отправьте ключевое слово или фразу одним сообщением.\n"
+        "<i>Ищет среди всех сохранённых сообщений за 7 дней по всем вашим чатам.</i>"
+    )
+
+
 def _safe_filename(name: str) -> str:
+
     cleaned = "".join(c if c.isalnum() or c in " _-" else "_" for c in name).strip()
     return cleaned[:60] or "chat"
 
@@ -793,7 +809,34 @@ async def private_input(message: Message, storage: Storage) -> None:
 
     kind = state["kind"]
 
+    if kind == "db_search":
+        query = (message.text or "").strip()
+        if not query:
+            await message.answer("❌ Введите текст для поиска. Попробуйте ещё раз:")
+            return
+        _pending.pop(user_id, None)
+        rows = storage.db.search_messages(user_id, query)
+        if not rows:
+            await message.answer(f"🔍 <b>Поиск по «{html.escape(query)}»:</b>\n\nНичего не найдено.")
+            return
+
+        lines = [f"🔍 <b>Результаты поиска по «{html.escape(query)}» ({len(rows)}):</b>\n"]
+        for r in rows:
+            ts = time.strftime("%d.%m %H:%M", time.localtime(r["cached_at"]))
+            sender = html.escape(r["from_user_name"] or "?")
+            chat_t = html.escape(r["chat_title"] or str(r["chat_id"]))
+            content = html.escape(r["content"] or "")
+            suffix = " 🗑" if r["deleted_at"] else (" ✏️" if r["edited_at"] else "")
+            lines.append(f"💬 <b>{chat_t}</b> | <b>{sender}</b> <i>{ts}</i>{suffix}\n{content}\n")
+
+        text = "\n".join(lines)
+        if len(text) > 4000:
+            text = text[:3900] + "\n\n<i>…показаны первые результаты</i>"
+        await message.answer(text)
+        return
+
     if kind == "edit_user":
+
         field = get_owner_field(state["key"])
         if field is None or not message.text:
             return
