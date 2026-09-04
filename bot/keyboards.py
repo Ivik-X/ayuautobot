@@ -7,7 +7,10 @@ def persistent_menu_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="📱 Меню")]],
         resize_keyboard=True,
+        is_persistent=True,
+        input_field_placeholder="Напишите сообщение или нажмите Меню",
     )
+
 
 
 from bot.settings import (

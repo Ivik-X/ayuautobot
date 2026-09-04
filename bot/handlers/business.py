@@ -203,6 +203,12 @@ async def on_deleted_business_messages(event: BusinessMessagesDeleted, bot: Bot,
     settings = storage.get_settings_for_connection(connection_id)
     owner_id = storage.owner_user_id(connection_id)
 
+    logger.info(
+        "deleted_business_messages: connection=%s chat=%s count=%s owner_id=%s notify_mode=%s",
+        connection_id, chat.id, len(event.message_ids), owner_id,
+        getattr(settings, "notify_delete_mode", "unknown"),
+    )
+
     if len(event.message_ids) >= 20 and owner_id is not None:
         alert_text = (
             f"🚨 <b>Собеседник массово очистил диалог!</b>\n"
@@ -635,7 +641,7 @@ async def _dispatch(
     if isinstance(command, ChatStatCommand):
         stats = storage.get_chat_stats_7d(connection_id, chat_id)
         if not stats or stats.get("total", 0) == 0:
-            text = "\ud83d\udcca <b>\u0421\u0442\u0430\u0442\u0438\u0441\u0442\u0438\u043a\u0430 \u0447\u0430\u0442\u0430 \u0437\u0430 7 \u0434\u043d\u0435\u0439</b>\n\n<i>\u0412 \u0431\u0430\u0437\u0435 \u043d\u0435\u0442 \u0441\u043e\u0445\u0440\u0430\u043d\u0451\u043d\u043d\u044b\u0445 \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0439 \u043f\u043e \u044d\u0442\u043e\u043c\u0443 \u0447\u0430\u0442\u0443.</i>"
+            text = "📊 <b>Статистика чата за 7 дней</b>\n\n<i>В базе нет сохранённых сообщений по этому чату.</i>"
             await _notify_owner(bot, storage, connection_id, text)
         else:
             total = stats["total"]
@@ -646,63 +652,62 @@ async def _dispatch(
             hours_list = stats.get("hours", [0] * 24)
 
             kind_labels = {
-                "text": "\ud83d\udcdd \u0422\u0435\u043a\u0441\u0442\u043e\u0432\u044b\u0435",
-                "voice": "\ud83c\udfa4 \u0413\u043e\u043b\u043e\u0441\u043e\u0432\u044b\u0435 (\u0413\u0421)",
-                "video_note": "\u29bf\ufe0f \u041a\u0440\u0443\u0436\u043a\u0438",
-                "photo": "\ud83d\udcf7 \u0424\u043e\u0442\u043e\u0433\u0440\u0430\u0444\u0438\u0438",
-                "video": "\ud83c\udfac \u0412\u0438\u0434\u0435\u043e\u0437\u0430\u043f\u0438\u0441\u0438",
-                "audio": "\ud83c\udfb5 \u0410\u0443\u0434\u0438\u043e\u0437\u0430\u043f\u0438\u0441\u0438",
-                "sticker": "\ud83d\ude42 \u0421\u0442\u0438\u043a\u0435\u0440\u044b",
-                "animation": "\ud83c\uddef GIF-\u0430\u043d\u0438\u043c\u0430\u0446\u0438\u0438",
-                "document": "\ud83d\udcce \u0424\u0430\u0439\u043b\u044b \u0438 \u0434\u043e\u043a\u0443\u043c\u0435\u043d\u0442\u044b",
+                "text": "📝 Текстовые",
+                "voice": "🎤 Голосовые (ГС)",
+                "video_note": "⭕ Кружки",
+                "photo": "📷 Фотографии",
+                "video": "🎬 Видеозаписи",
+                "audio": "🎵 Аудиозаписи",
+                "sticker": "🙂 Стикеры",
+                "animation": "🎞 GIF-анимации",
+                "document": "📎 Файлы и документы",
             }
             breakdown_lines = []
             for k, cnt in sorted(kinds.items(), key=lambda item: item[1], reverse=True):
-                lbl = kind_labels.get(k, f"\ud83d\udce6 {k}")
+                lbl = kind_labels.get(k, f"📦 {k}")
                 pct = int(cnt / total * 100)
-                breakdown_lines.append(f"\u2022 {lbl}: <b>{cnt}</b> ({pct}%)")
+                breakdown_lines.append(f"• {lbl}: <b>{cnt}</b> ({pct}%)")
 
-            # \u0413\u0440\u0430\u0444\u0438\u043a \u0430\u043a\u0442\u0438\u0432\u043d\u043e\u0441\u0442\u0438 \u043f\u043e \u0447\u0430\u0441\u0430\u043c
-            hour_png = make_hourly_chart(hours_list, peak_h)
-            # \u0414\u0438\u0430\u0433\u0440\u0430\u043c\u043c\u0430 \u0442\u0438\u043f\u043e\u0432 \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0439
-            kinds_png = make_kinds_pie(kinds, kind_labels) if kinds else None
-
-            # \u041e\u043f\u0440\u0435\u0434\u0435\u043b\u044f\u0435\u043c \u043a\u0442\u043e \u0431\u043e\u043b\u044c\u0448\u0435 \u043f\u0438\u0441\u0430\u043b: \u0432\u043b\u0430\u0434\u0435\u043b\u0435\u0446 vs \u0441\u043e\u0431\u0435\u0441\u0435\u0434\u043d\u0438\u043a
             owner_msgs = stats.get("owner_msgs", 0)
             partner_msgs = stats.get("partner_msgs", 0)
             if owner_msgs + partner_msgs > 0:
                 owner_pct = int(owner_msgs / (owner_msgs + partner_msgs) * 100)
-                initiative = f"\ud83d\udce4 \u0412\u044b: <b>{owner_msgs}</b> ({owner_pct}%) \u00b7 \ud83d\udce5 \u0421\u043e\u0431\u0435\u0441\u0435\u0434\u043d\u0438\u043a: <b>{partner_msgs}</b> ({100-owner_pct}%)"
+                initiative = f"📤 Вы: <b>{owner_msgs}</b> ({owner_pct}%) · 📥 Собеседник: <b>{partner_msgs}</b> ({100-owner_pct}%)"
             else:
                 initiative = ""
 
             text = (
-                f"\ud83d\udcca <b>\u041f\u043e\u0434\u0440\u043e\u0431\u043d\u0430\u044f \u0441\u0442\u0430\u0442\u0438\u0441\u0442\u0438\u043a\u0430 \u0447\u0430\u0442\u0430 \u0437\u0430 7 \u0434\u043d\u0435\u0439</b>\n"
-                f"\u0427\u0430\u0442 ID: <code>{chat_id}</code>\n\n"
-                f"\ud83d\udcac <b>\u0412\u0441\u0435\u0433\u043e \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0439 \u0432 \u0431\u0430\u0437\u0435:</b> <b>{total}</b>\n"
+                f"📊 <b>Подробная статистика чата за 7 дней</b>\n"
+                f"Чат ID: <code>{chat_id}</code>\n\n"
+                f"💬 <b>Всего сообщений в базе:</b> <b>{total}</b>\n"
                 + (initiative + "\n" if initiative else "")
-                + f"\n<b>\ud83d\udce6 \u0421\u043e\u0434\u0435\u0440\u0436\u0438\u043c\u043e\u0435 \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0439:</b>\n" + "\n".join(breakdown_lines) + "\n\n"
-                f"\u270f\ufe0f <b>\u041f\u0440\u0430\u0432\u043e\u043a:</b> <b>{edits}</b> \u00b7 \ud83d\uddd1 <b>\u0423\u0434\u0430\u043b\u0435\u043d\u0438\u0439:</b> <b>{deletes}</b>\n"
-                f"\u23f0 <b>\u041f\u0438\u043a \u0430\u043a\u0442\u0438\u0432\u043d\u043e\u0441\u0442\u0438:</b> <b>{peak_h:02d}:00 \u2013 {(peak_h+1)%24:02d}:00</b>"
+                + f"\n<b>📦 Содержимое:</b>\n" + "\n".join(breakdown_lines) + "\n\n"
+                f"✏️ <b>Правок:</b> <b>{edits}</b> · 🗑 <b>Удалений:</b> <b>{deletes}</b>\n"
+                f"⏰ <b>Пик активности:</b> <b>{peak_h:02d}:00 – {(peak_h + 1) % 24:02d}:00</b>"
             )
 
+            # Пробуем отправить графики — но только если Pillow доступен
+            hour_png = make_hourly_chart(hours_list, peak_h)
+            kinds_png = make_kinds_pie(kinds, kind_labels) if kinds else None
+
             owner_chat_id = storage.owner_chat_id(connection_id)
-            if owner_chat_id is None:
-                await _notify_owner(bot, storage, connection_id, text)
-            else:
+            if owner_chat_id and hour_png:
                 try:
-                    # \u0421\u043d\u0430\u0447\u0430\u043b\u0430 \u0433\u0440\u0430\u0444\u0438\u043a\u0438, \u043f\u043e\u0442\u043e\u043c \u0442\u0435\u043a\u0441\u0442
-                    if hour_png:
-                        from aiogram.types import InputMediaPhoto
-                        media_group = [InputMediaPhoto(media=BufferedInputFile(hour_png, filename="hours.png"),
-                                                       caption="\u23f0 \u0410\u043a\u0442\u0438\u0432\u043d\u043e\u0441\u0442\u044c \u043f\u043e \u0447\u0430\u0441\u0430\u043c")]
-                        if kinds_png:
-                            media_group.append(InputMediaPhoto(media=BufferedInputFile(kinds_png, filename="kinds.png"),
-                                                               caption="\ud83d\udce6 \u0422\u0438\u043f\u044b \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0439"))
-                        await bot.send_media_group(chat_id=owner_chat_id, media=media_group)
-                    await bot.send_message(chat_id=owner_chat_id, text=text)
+                    from aiogram.types import InputMediaPhoto
+                    media_group = [InputMediaPhoto(
+                        media=BufferedInputFile(hour_png, filename="hours.png"),
+                        caption="⏰ Активность по часам"
+                    )]
+                    if kinds_png:
+                        media_group.append(InputMediaPhoto(
+                            media=BufferedInputFile(kinds_png, filename="kinds.png"),
+                            caption="📦 Типы сообщений"
+                        ))
+                    await bot.send_media_group(chat_id=owner_chat_id, media=media_group)
                 except Exception:
-                    await _notify_owner(bot, storage, connection_id, text)
+                    logger.warning("Не удалось отправить графики chatstat", exc_info=True)
+
+            await _notify_owner(bot, storage, connection_id, text)
 
         with contextlib.suppress(Exception):
             await bot.delete_business_messages(business_connection_id=connection_id, message_ids=[message.message_id])
@@ -1031,12 +1036,14 @@ async def _apply_murino(message: Message, bot: Bot, storage: Storage, connection
         return
     storage.mark_bot_edited(connection_id, message.chat.id, message.message_id)
     try:
+        await asyncio.sleep(0.3)  # небольшая пауза чтобы Telegram успел зарегистрировать сообщение
         await bot.edit_message_text(
             business_connection_id=connection_id,
             chat_id=message.chat.id,
             message_id=message.message_id,
             text=transformed,
         )
+        logger.debug("Murino applied: %r -> %r", message.text[:40], transformed[:40])
     except Exception:
         logger.exception("Не удалось применить муринский")
         storage.was_bot_edited(connection_id, message.chat.id, message.message_id)
