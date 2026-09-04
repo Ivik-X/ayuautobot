@@ -303,8 +303,11 @@ class Storage:
         cutoff = time.time() - (48 * 3600)
         return self._db.stats_48h(cutoff)
 
+    def get_chat_stats(self, connection_id: str, chat_id: int) -> dict:
+        return self._db.get_chat_stats(connection_id, chat_id)
+
     def get_chat_stats_7d(self, connection_id: str, chat_id: int) -> dict:
-        return self._db.get_chat_stats_7d(connection_id, chat_id)
+        return self.get_chat_stats(connection_id, chat_id)
 
 
     def all_owners_with_stats(self) -> list[dict]:

@@ -309,20 +309,25 @@ class Database:
             "deletes": int(deletes),
         }
 
-    def get_chat_stats_7d(self, connection_id: str, chat_id: int) -> dict:
-        cutoff = time.time() - (7 * 86400)
+    def get_chat_stats(self, connection_id: str, chat_id: int) -> dict:
+        import math
         rows = self._conn.execute(
             """
             SELECT kind, media_kind, edited_at, deleted_at, cached_at, owner_id, from_user_id
             FROM messages
-            WHERE connection_id = ? AND chat_id = ? AND cached_at >= ?
+            WHERE connection_id = ? AND chat_id = ?
             """,
-            (connection_id, chat_id, cutoff),
+            (connection_id, chat_id),
         ).fetchall()
 
         total = len(rows)
         if total == 0:
-            return {"total": 0}
+            return {"total": 0, "days": 0}
+
+        cached_ts = [r["cached_at"] for r in rows if r["cached_at"]]
+        min_ts = min(cached_ts) if cached_ts else time.time()
+        now = time.time()
+        days_span = max(1, math.ceil((now - min_ts) / 86400))
 
         edits = sum(1 for r in rows if r["edited_at"] is not None)
         deletes = sum(1 for r in rows if r["deleted_at"] is not None)
@@ -339,7 +344,6 @@ class Database:
             if r["cached_at"]:
                 h = datetime.datetime.fromtimestamp(r["cached_at"]).hour
                 hours[h] += 1
-            # Считаем: owner_id совпадает с from_user_id → владелец отправил
             if r["owner_id"] and r["from_user_id"] and r["owner_id"] == r["from_user_id"]:
                 owner_msgs += 1
             else:
@@ -349,6 +353,7 @@ class Database:
 
         return {
             "total": total,
+            "days": days_span,
             "edits": edits,
             "deletes": deletes,
             "kinds": kinds,
@@ -357,6 +362,9 @@ class Database:
             "owner_msgs": owner_msgs,
             "partner_msgs": partner_msgs,
         }
+
+    def get_chat_stats_7d(self, connection_id: str, chat_id: int) -> dict:
+        return self.get_chat_stats(connection_id, chat_id)
 
 
 

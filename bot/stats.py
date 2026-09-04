@@ -85,9 +85,9 @@ def format_admin_overview(
     backup_interval_hours: float,
     last_backup_ts: float | None,
     total_stars: int = 0,
-    db_max_size_gb: float = 20.0,
-    media_max_total_mb: int = 7168,
-    media_max_age_hours: float = 168.0,
+    db_max_size_gb: float = 10.0,
+    media_max_total_mb: int = 10240,
+    media_max_age_hours: float = 0.0,
 
     media_max_file_mb: int = 50,
     active_users_48h: int = 0,
@@ -106,6 +106,7 @@ def format_admin_overview(
     db_usage_pct = (db_size_mb / 1024 / db_max_size_gb * 100) if db_max_size_gb > 0 else 0
     media_usage_pct = (media_mb / media_max_total_mb * 100) if media_max_total_mb > 0 else 0
 
+    ttl_str = f"{media_max_age_hours:g} ч" if media_max_age_hours > 0 else "без ограничений"
 
     return (
         "<b>🛠 Панель администратора</b>\n\n"
@@ -117,7 +118,7 @@ def format_admin_overview(
         f"💾 <b>БД:</b> {db_size_mb:.1f} МБ / {db_max_size_gb:.0f} ГБ ({db_usage_pct:.0f}%)\n"
         f"🗂 Сообщений в БД: <b>{db_messages}</b> активных (всего <b>{db_messages_total}</b>)\n\n"
         f"🖼 <b>Медиа-хранилище:</b> {media_mb:.1f} МБ / {media_max_total_mb // 1024} ГБ ({media_usage_pct:.0f}%)\n"
-        f"⏰ TTL медиа: <b>{media_max_age_hours:g} ч</b> · Макс. файл: <b>{media_max_file_mb} МБ</b>\n\n"
+        f"⏰ TTL медиа: <b>{ttl_str}</b> · Макс. файл: <b>{media_max_file_mb} МБ</b>\n\n"
         f"📦 Автобэкап: <b>{'вкл' if backup_enabled else 'выкл'}</b> (каждые {backup_interval_hours:g} ч)\n"
         f"🕓 Последний бэкап: {last_backup}"
     )

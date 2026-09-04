@@ -101,10 +101,10 @@ def load_config() -> Config:
         backup_compress=_bool("BACKUP_COMPRESS", True),
         cache_max_entries=_int("CACHE_MAX_ENTRIES", 5000),
         cache_cleanup_interval_min=_int("CACHE_CLEANUP_INTERVAL_MIN", 10),
-        media_max_total_mb=_int("MEDIA_MAX_TOTAL_MB", 7168),
-        media_max_age_hours=_float("MEDIA_MAX_AGE_HOURS", 168.0),
+        media_max_total_mb=_int("MEDIA_MAX_TOTAL_MB", 10240),
+        media_max_age_hours=_float("MEDIA_MAX_AGE_HOURS", 0.0),
         media_max_file_mb=_int("MEDIA_MAX_FILE_MB", 50),
-        db_max_size_gb=_float("DB_MAX_SIZE_GB", 20.0),
+        db_max_size_gb=_float("DB_MAX_SIZE_GB", 10.0),
         min_free_disk_gb=_float("MIN_FREE_DISK_GB", 5.0),
         profile_watch_interval_min=_int("PROFILE_WATCH_INTERVAL_MIN", 720),
     )

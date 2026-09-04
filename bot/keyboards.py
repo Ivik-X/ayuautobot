@@ -265,8 +265,8 @@ def admin_section_keyboard(section: str, settings: GlobalSettings) -> InlineKeyb
         rows.append([InlineKeyboardButton(text=text, callback_data=cb)])
 
     if section == "cache":
-        rows.append([InlineKeyboardButton(text="🧹 Очистить БД (> 7 дней)", callback_data="ad:clean:db")])
-        rows.append([InlineKeyboardButton(text="🗑 Очистить медиа (> 7 дней)", callback_data="ad:clean:media")])
+        rows.append([InlineKeyboardButton(text="🧹 Очистить старые записи БД", callback_data="ad:clean:db")])
+        rows.append([InlineKeyboardButton(text="🗑 Очистить старые медиафайлы", callback_data="ad:clean:media")])
         rows.append([InlineKeyboardButton(text="📥 Сбросить RAM-кэш", callback_data="ad:clean:cache")])
 
     rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="ad:back")])

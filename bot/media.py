@@ -225,7 +225,7 @@ def unlink_media(media: MediaRef | None) -> None:
     if media is None or media.local_path is None:
         return
     try:
-        if DB_MEDIA_DIR in media.local_path.parents:
+        if DB_MEDIA_DIR in media.local_path.parents or MEDIA_DIR in media.local_path.parents:
             return
         if media.local_path.exists():
             media.local_path.unlink()

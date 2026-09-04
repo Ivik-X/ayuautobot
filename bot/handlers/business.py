@@ -70,6 +70,15 @@ logger = logging.getLogger(__name__)
 router = Router(name="business")
 
 
+def _format_days_ru(n: int) -> str:
+    if n % 10 == 1 and n % 100 != 11:
+        return f"{n} день"
+    elif 2 <= n % 10 <= 4 and not (12 <= n % 100 <= 14):
+        return f"{n} дня"
+    else:
+        return f"{n} дней"
+
+
 def _is_whitelisted_message(storage: Storage, message: Message) -> bool:
     if message.from_user and storage.is_whitelisted(message.from_user.id):
         return True
@@ -243,6 +252,12 @@ async def on_deleted_business_messages(event: BusinessMessagesDeleted, bot: Bot,
                         )
         except Exception:
             logger.exception("Не удалось выполнить авто-дамп чата при очистке")
+
+        # Отмечаем все удалённые сообщения в БД и не затапливаем ЛС десятками уведомлений
+        for message_id in event.message_ids:
+            storage.remove_cached(connection_id, chat.id, message_id)
+            storage.was_bot_deleted(connection_id, chat.id, message_id)
+        return
 
 
     if owner_id is None or settings.notify_delete_mode == "off":
@@ -639,9 +654,11 @@ async def _dispatch(
         return
 
     if isinstance(command, ChatStatCommand):
-        stats = storage.get_chat_stats_7d(connection_id, chat_id)
+        stats = storage.get_chat_stats(connection_id, chat_id)
+        days_cnt = stats.get("days", 1)
+        days_str = _format_days_ru(days_cnt)
         if not stats or stats.get("total", 0) == 0:
-            text = "📊 <b>Статистика чата за 7 дней</b>\n\n<i>В базе нет сохранённых сообщений по этому чату.</i>"
+            text = "📊 <b>Статистика чата</b>\n\n<i>В базе нет сохранённых сообщений по этому чату.</i>"
             await _notify_owner(bot, storage, connection_id, text)
         else:
             total = stats["total"]
@@ -677,7 +694,7 @@ async def _dispatch(
                 initiative = ""
 
             text = (
-                f"📊 <b>Подробная статистика чата за 7 дней</b>\n"
+                f"📊 <b>Подробная статистика чата за {days_str}</b>\n"
                 f"Чат ID: <code>{chat_id}</code>\n\n"
                 f"💬 <b>Всего сообщений в базе:</b> <b>{total}</b>\n"
                 + (initiative + "\n" if initiative else "")

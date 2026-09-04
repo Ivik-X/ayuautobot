@@ -20,11 +20,11 @@ async def run_cleanup_loop(storage: Storage) -> None:
         # 1. Чистка RAM-кэша по персональному TTL владельцев
         removed_cache = storage.purge_expired_all()
 
-        # 2. Удалить медиафайлы старше TTL
-        age_removed = enforce_media_age(MEDIA_DIR, settings.media_max_age_hours)
+        # 2. Удалить медиафайлы старше TTL (если задан)
+        age_removed = enforce_media_age(MEDIA_DIR, settings.media_max_age_hours) if settings.media_max_age_hours > 0 else 0
 
-        # 3. Удалить из БД строки сообщений старше TTL (7 дней)
-        db_ttl_removed = storage.db.purge_messages_older_than(settings.media_max_age_hours)
+        # 3. Удалить из БД строки сообщений старше TTL (если задан)
+        db_ttl_removed = storage.db.purge_messages_older_than(settings.media_max_age_hours) if settings.media_max_age_hours > 0 else 0
 
         # 4. Квота медиа на диске с учётом резерва 2 ГБ
         media_reserve_mb = int(getattr(settings, "media_reserve_gb", 2.0) * 1024)
@@ -51,8 +51,8 @@ def startup_cleanup(storage: Storage) -> int:
     settings = storage.get_global()
 
     removed_cache = storage.purge_expired_all()
-    age_removed = enforce_media_age(MEDIA_DIR, settings.media_max_age_hours)
-    db_ttl_removed = storage.db.purge_messages_older_than(settings.media_max_age_hours)
+    age_removed = enforce_media_age(MEDIA_DIR, settings.media_max_age_hours) if settings.media_max_age_hours > 0 else 0
+    db_ttl_removed = storage.db.purge_messages_older_than(settings.media_max_age_hours) if settings.media_max_age_hours > 0 else 0
 
     media_reserve_mb = int(getattr(settings, "media_reserve_gb", 2.0) * 1024)
     effective_media_quota_mb = max(settings.media_max_total_mb - media_reserve_mb, 512)
