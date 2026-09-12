@@ -34,6 +34,8 @@ class Storage:
         self._bot_deleted: set[tuple[str, int, int]] = set()
         self._bot_edited: set[tuple[str, int, int]] = set()  # редактирование ботом (антипоиск/.view)
         self._afk_last_reply: dict[tuple[str, int], float] = {}
+        self._online_tasks: dict[int, asyncio.Task] = {}
+        self._online_until: dict[int, float | None] = {}
 
     @property
     def db(self) -> Database:
@@ -47,7 +49,13 @@ class Storage:
         self._connections[connection.id] = connection
         owner_id = connection.user.id
         self._owner_of_connection[connection.id] = owner_id
-        self._db.ensure_owner(owner_id, is_admin=self.is_admin(owner_id))
+        user = connection.user
+        self._db.ensure_owner(
+            owner_id,
+            is_admin=self.is_admin(owner_id),
+            full_name=user.full_name,
+            username=user.username,
+        )
         self._db.upsert_connection(
             connection.id, owner_id, connection.user_chat_id, connection.is_enabled
         )
@@ -65,7 +73,13 @@ class Storage:
         chat_id = self._db.user_chat_id_for_connection(connection_id)
         if chat_id is not None:
             self._owner_chat_cache[connection_id] = chat_id
-        return chat_id
+            return chat_id
+        # Fallback: в Telegram Bot API для ЛС с ботом user_chat_id совпадает с user.id
+        owner = self.owner_user_id(connection_id)
+        if owner is not None:
+            self._owner_chat_cache[connection_id] = owner
+            return owner
+        return None
 
     def owner_user_id(self, connection_id: str) -> int | None:
         connection = self._connections.get(connection_id)
@@ -216,9 +230,7 @@ class Storage:
         cached = self.find_cached(connection_id, chat_id, message_id)
 
         for key in _lookup_keys(connection_id, chat_id, message_id):
-            item = self._cache.pop(key)
-            if item is not None:
-                unlink_media(item.media)
+            self._cache.pop(key)
 
         db_cached = self._db.mark_deleted(connection_id, chat_id, message_id)
         return cached or db_cached
@@ -361,12 +373,37 @@ class Storage:
         self._afk_last_reply[key] = now
         return True
 
-    # ---------------------------------------------------------- say presets
-    def preset_add(self, owner_id: int, name: str, items: list[dict]) -> None:
-        self._db.preset_set(owner_id, name, items)
+    # ----------------------------------------------------------- online mode
+    def start_online(self, owner_id: int, duration_sec: int | None, task: asyncio.Task) -> None:
+        self.stop_online(owner_id)
+        self._online_tasks[owner_id] = task
+        self._online_until[owner_id] = (time.time() + duration_sec) if duration_sec is not None else None
 
-    def preset_get(self, owner_id: int, name: str) -> list[dict] | None:
-        return self._db.preset_get(owner_id, name)
+    def stop_online(self, owner_id: int) -> None:
+        old_task = self._online_tasks.pop(owner_id, None)
+        self._online_until.pop(owner_id, None)
+        if old_task and not old_task.done():
+            old_task.cancel()
+
+    def is_online(self, owner_id: int) -> bool:
+        task = self._online_tasks.get(owner_id)
+        if not task or task.done():
+            self._online_tasks.pop(owner_id, None)
+            self._online_until.pop(owner_id, None)
+            return False
+        until = self._online_until.get(owner_id)
+        if until is not None and time.time() >= until:
+            self.stop_online(owner_id)
+            return False
+        return True
+
+    def get_online_remaining_seconds(self, owner_id: int) -> int | None:
+        if not self.is_online(owner_id):
+            return 0
+        until = self._online_until.get(owner_id)
+        if until is None:
+            return None  # бессрочно
+        return max(0, int(until - time.time()))
 
     def preset_delete(self, owner_id: int, name: str) -> bool:
         return self._db.preset_delete(owner_id, name)

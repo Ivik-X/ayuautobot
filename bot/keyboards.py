@@ -58,6 +58,10 @@ def menu_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🔍 Поиск по базе", callback_data="us:search"),
         ],
         [
+            InlineKeyboardButton(text="🟢 Онлайн-режим", callback_data="us:open:online"),
+            InlineKeyboardButton(text="⚡️ Действия над чатом", callback_data="us:open:actions"),
+        ],
+        [
             InlineKeyboardButton(text="📤 Экспорт истории", callback_data="us:export"),
         ],
         [InlineKeyboardButton(text="✖️ Закрыть", callback_data="us:close")],
@@ -226,10 +230,16 @@ def admin_main_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def admin_users_keyboard(owners: list[dict]) -> InlineKeyboardMarkup:
-    """Keyboard for admin users list with 48h resource usage stats and ban/unban buttons."""
+def admin_users_keyboard(owners: list[dict], page: int = 1, per_page: int = 6) -> InlineKeyboardMarkup:
+    """Keyboard for admin users list with pagination, user details, and ban/unban buttons."""
+    total_owners = len(owners)
+    total_pages = max(1, (total_owners + per_page - 1) // per_page)
+    page = max(1, min(page, total_pages))
+    start_idx = (page - 1) * per_page
+    page_owners = owners[start_idx : start_idx + per_page]
+
     rows: list[list[InlineKeyboardButton]] = []
-    for o in owners[:30]:
+    for o in page_owners:
         uid = o["owner_id"]
         is_banned = o.get("is_banned", False)
         is_admin = o.get("is_admin", False)
@@ -237,17 +247,103 @@ def admin_users_keyboard(owners: list[dict]) -> InlineKeyboardMarkup:
         msgs_48h = o.get("msgs_48h", 0) or 0
         media_48h = o.get("media_48h", 0) or 0
         media_mb = o.get("media_mb", 0.0) or 0.0
-        
+
         status_icon = "🔴" if is_banned else ("⭐" if is_admin else ("🟢" if conns else "⚪"))
-        
-        label = f"{status_icon} {uid} | 48h: {msgs_48h}💬 {media_48h}🖼 ({media_mb:.1f}MB)"
-        if is_banned:
-            action_btn = InlineKeyboardButton(text="✅ Разбанить", callback_data=f"ad:user:unban:{uid}")
-        else:
-            action_btn = InlineKeyboardButton(text="🚫 Забанить", callback_data=f"ad:user:ban:{uid}")
-        rows.append([InlineKeyboardButton(text=label, callback_data="ad:noop"), action_btn])
+        name = o.get("full_name") or f"Пользователь"
+        uname = f" (@{o['username']})" if o.get("username") else ""
+
+        # Сначала ник, юз и уже потом id
+        title_btn = InlineKeyboardButton(
+            text=f"{status_icon} {name}{uname} [ID: {uid}]",
+            callback_data=f"ad:user:view:{uid}",
+        )
+        stats_text = f"📊 48ч: {msgs_48h}💬 {media_48h}🖼 ({media_mb:.1f}MB)"
+        action_btn = (
+            InlineKeyboardButton(text="✅ Разбанить", callback_data=f"ad:user:unban:{uid}:{page}")
+            if is_banned
+            else InlineKeyboardButton(text="🚫 Забанить", callback_data=f"ad:user:ban:{uid}:{page}")
+        )
+        rows.append([title_btn])
+        rows.append([
+            InlineKeyboardButton(text=stats_text, callback_data=f"ad:user:view:{uid}"),
+            action_btn,
+        ])
+
+    nav_row = []
+    if page > 1:
+        nav_row.append(InlineKeyboardButton(text="◀️ Назад", callback_data=f"ad:users:page:{page - 1}"))
+    nav_row.append(InlineKeyboardButton(text=f"Стр. {page}/{total_pages}", callback_data="ad:noop"))
+    if page < total_pages:
+        nav_row.append(InlineKeyboardButton(text="Вперёд ▶️", callback_data=f"ad:users:page:{page + 1}"))
+    rows.append(nav_row)
+
+    rows.append([InlineKeyboardButton(text="🔍 Найти пользователя по ID", callback_data="ad:user:find")])
     rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="ad:back")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def admin_user_detail_keyboard(uid: int, is_banned: bool, is_admin: bool) -> InlineKeyboardMarkup:
+    rows = []
+    if not is_admin:
+        if is_banned:
+            rows.append([InlineKeyboardButton(text="✅ Разбанить", callback_data=f"ad:user:unban:{uid}:1")])
+        else:
+            rows.append([InlineKeyboardButton(text="🚫 Забанить", callback_data=f"ad:user:ban:{uid}:1")])
+    rows.append([InlineKeyboardButton(text="⬅️ К списку пользователей", callback_data="ad:open:users")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def online_menu_keyboard(is_active: bool, remaining_sec: int | None, is_admin: bool = False) -> InlineKeyboardMarkup:
+    rows = []
+    if is_active:
+        rows.append([InlineKeyboardButton(text="⏹ Выключить онлайн-режим", callback_data="us:online:stop")])
+    else:
+        rows.append([
+            InlineKeyboardButton(text="⏱ 15 мин", callback_data="us:online:start:900"),
+            InlineKeyboardButton(text="⏱ 30 мин", callback_data="us:online:start:1800"),
+            InlineKeyboardButton(text="⏱ 1 час", callback_data="us:online:start:3600"),
+        ])
+        if is_admin:
+            rows.append([
+                InlineKeyboardButton(text="⏱ 3 часа ⭐", callback_data="us:online:start:10800"),
+                InlineKeyboardButton(text="⏱ 12 часов ⭐", callback_data="us:online:start:43200"),
+                InlineKeyboardButton(text="♾ Бессрочно ⭐", callback_data="us:online:start:0"),
+            ])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="us:back")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def chat_actions_menu_keyboard(chats: list[dict]) -> InlineKeyboardMarkup:
+    rows = []
+    for c in chats[:10]:
+        cid = c["chat_id"]
+        title = c["title"]
+        rows.append([InlineKeyboardButton(text=f"💬 {title}", callback_data=f"act:chat:{cid}")])
+    rows.append([InlineKeyboardButton(text="➕ Ввести Chat ID вручную", callback_data="act:manual")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="us:back")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def chat_action_picker_keyboard(chat_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🔇 Mute навсегда", callback_data=f"act:do:mute_perm:{chat_id}"),
+            InlineKeyboardButton(text="🔊 Снять Mute", callback_data=f"act:do:unmute:{chat_id}"),
+        ],
+        [
+            InlineKeyboardButton(text="⏱ Mute 1 час", callback_data=f"act:do:mute_1h:{chat_id}"),
+            InlineKeyboardButton(text="⌨️ Typing (10с)", callback_data=f"act:do:typing:{chat_id}"),
+        ],
+        [
+            InlineKeyboardButton(text="👤 Клонировать", callback_data=f"act:do:clone:{chat_id}"),
+            InlineKeyboardButton(text="🗑 Удалить N сообщ.", callback_data=f"act:do:del:{chat_id}"),
+        ],
+        [
+            InlineKeyboardButton(text="💣 Спам в чат", callback_data=f"act:do:spam:{chat_id}"),
+            InlineKeyboardButton(text="🔍 Удалить по слову", callback_data=f"act:do:delword:{chat_id}"),
+        ],
+        [InlineKeyboardButton(text="⬅️ К выбору чата", callback_data="us:open:actions")],
+    ])
 
 
 def admin_section_keyboard(section: str, settings: GlobalSettings) -> InlineKeyboardMarkup:

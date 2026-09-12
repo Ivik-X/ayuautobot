@@ -37,6 +37,26 @@ DICTIONARY: dict[str, list[str]] = {
     "работа": ["работасть"],
     "день": ["деньность"],
     "человек": ["человекость"],
+    # дополнительные
+    "привет": ["приветность"],
+    "пока": ["покасть"],
+    "да": ["даность"],
+    "хорошо": ["хорошость"],
+    "плохо": ["плохость"],
+    "нет": ["нетость"],
+    "спать": ["спатьость"],
+    "есть": ["естьость"],
+    "пить": ["питьость"],
+    "гулять": ["гулятьость"],
+    "сидеть": ["сидетьость"],
+    "нравится": ["нравитсяость"],
+    "люблю": ["люблюость"],
+    "хочу": ["хочуость"],
+    "можно": ["можность"],
+    "нельзя": ["нельзяость"],
+    "классно": ["классность"],
+    "прикольно": ["прикольность"],
+    "приветствие": ["приветствиеость"],
 }
 
 PRONOUN_KEYS = frozenset(["я", "ты", "он", "она", "оно"])
@@ -51,8 +71,8 @@ STOP_WORDS = frozenset([
     "ему", "ей", "меня", "мне", "мной", "тебя", "тебе", "тобой",
 ])
 
-# Вероятность применения суффикса — низкая, «сильно пореже»
-SUFFIX_PROB = 0.18
+# Вероятность применения суффикса — заметное преобразование для большинства сообщений
+SUFFIX_PROB = 0.40
 
 _WORD_RE = re.compile(r"([A-Za-zА-Яа-яЁё]+)")
 _VOWELS_END = set("аяыиьоеёую")
@@ -94,6 +114,21 @@ def transform(text: str) -> str:
         return raw
 
     result = _WORD_RE.sub(replace_word, text)
-    if len(result) > len(text) * 1.6 + 10:
+    if result == text:
+        # Если случайно ни одно слово не изменилось, форсируем изменение хотя бы одного слова >= 3 букв
+        words = list(_WORD_RE.finditer(text))
+        for match in words:
+            raw = match.group(0)
+            lower = raw.lower()
+            if lower in DICTIONARY:
+                rep = _match_case(raw, random.choice(DICTIONARY[lower]))
+                result = text[:match.start()] + rep + text[match.end():]
+                break
+            if len(raw) >= 3 and lower not in {"что", "как", "это", "для", "при", "под", "над"}:
+                rep = _match_case(raw, _apply_suffix(lower))
+                result = text[:match.start()] + rep + text[match.end():]
+                break
+
+    if len(result) > len(text) * 1.8 + 10:
         return text
     return result

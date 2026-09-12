@@ -4,6 +4,8 @@ import asyncio
 import html
 import logging
 import uuid
+import json
+import tempfile
 from pathlib import Path
 
 import aiohttp
@@ -14,6 +16,7 @@ from aiogram.types import (
     BusinessConnection,
     BusinessMessagesDeleted,
     CallbackQuery,
+    FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     InputMediaPhoto,
@@ -27,6 +30,8 @@ from bot.commands import (
     ChatStatCommand,
     CloneCommand,
     DelCommand,
+    DelRegexCommand,
+    DelWordCommand,
     MuteCommand,
     QrCommand,
     SayCommand,
@@ -88,10 +93,27 @@ def _is_whitelisted_message(storage: Storage, message: Message) -> bool:
 
 
 @router.business_connection()
-async def on_business_connection(connection: BusinessConnection, storage: Storage) -> None:
+async def on_business_connection(connection: BusinessConnection, bot: Bot, storage: Storage) -> None:
     storage.set_connection(connection)
     status = "подключён" if connection.is_enabled else "отключён"
     logger.info("Business connection %s: %s (owner=%s)", connection.id, status, connection.user.id)
+
+    user = connection.user
+    user_name = user.full_name or "Пользователь"
+    user_handle = f" (@{user.username})" if user.username else ""
+    icon = "🟢" if connection.is_enabled else "🔴"
+    action_text = "подключил" if connection.is_enabled else "отключил"
+    notify_text = (
+        f"{icon} <b>Пользователь {action_text} Telegram Business!</b>\n\n"
+        f"👤 <b>Профиль:</b> {html.escape(user_name)}{user_handle}\n"
+        f"🆔 <b>User ID:</b> <code>{user.id}</code>\n"
+        f"🔗 <b>Connection ID:</b> <code>{connection.id}</code>"
+    )
+    for admin_id in storage._admin_ids:
+        try:
+            await bot.send_message(chat_id=admin_id, text=notify_text)
+        except Exception:
+            logger.debug("Не удалось отправить уведомление о connection админу %s", admin_id)
 
 
 @router.business_message()
@@ -160,8 +182,15 @@ async def on_edited_business_message(message: Message, bot: Bot, storage: Storag
     partner = message.from_user.full_name if message.from_user else "Собеседник"
     chat_title = _chat_title(message)
     chat_link = _clickable_chat_link(message.chat, chat_title)
+    def _safe_html(text: str) -> str:
+        if not text:
+            return ""
+        if any(tag in text for tag in ("<b>", "<i>", "<code>", "<s>", "<u>", "<tg-spoiler>", "<span", "<a ")):
+            return text
+        return html.escape(text)
+
     old_text = old.content if old else "— (не сохранено)"
-    new_text = describe_message(message)
+    new_text = message.html_text or describe_message(message)
     flags = _flags_text(message, old)
 
     edit_history = storage.db.get_edit_history(connection_id, message.chat.id, message.message_id)
@@ -169,11 +198,12 @@ async def on_edited_business_message(message: Message, bot: Bot, storage: Storag
         history_lines = []
         for idx, entry in enumerate(edit_history, start=1):
             ts = time.strftime("%H:%M:%S", time.localtime(entry.get("ts", time.time())))
-            history_lines.append(f"{idx}️⃣ <i>[{ts}]</i> {html.escape(entry.get('content', ''))}")
+            raw_entry = entry.get('content', '')
+            history_lines.append(f"{idx}️⃣ <i>[{ts}]</i> {_safe_html(raw_entry)}")
         history_block = "<b>📜 Хронология правок:</b>\n" + "\n".join(history_lines) + "\n\n"
         edit_num_str = f" (Правка #{len(edit_history)})"
     else:
-        history_block = f"<b>Было:</b>\n{html.escape(old_text)}\n\n"
+        history_block = f"<b>Было:</b>\n{_safe_html(old_text)}\n\n"
         edit_num_str = ""
 
     caption = (
@@ -181,7 +211,7 @@ async def on_edited_business_message(message: Message, bot: Bot, storage: Storag
         f"Чат: {chat_link}\n"
         f"От: <b>{html.escape(partner)}</b>{flags}\n\n"
         f"{history_block}"
-        f"<b>Текущая версия (Стало):</b>\n{html.escape(new_text)}"
+        f"<b>Текущая версия (Стало):</b>\n{_safe_html(new_text)}"
     )
 
     media_changed = (
@@ -273,6 +303,13 @@ async def on_deleted_business_messages(event: BusinessMessagesDeleted, bot: Bot,
         if bot_caused and not settings.notify_own_deletions:
             continue
 
+        def _safe_html(text: str) -> str:
+            if not text:
+                return ""
+            if any(tag in text for tag in ("<b>", "<i>", "<code>", "<s>", "<u>", "<tg-spoiler>", "<span", "<a ")):
+                return text
+            return html.escape(text)
+
         sender = cached.from_user_name if cached else (chat.full_name or chat.username or "собеседник")
         body = cached.content if cached else "— (сообщение не было получено ботом, пока он был запущен)"
         flags = ""
@@ -285,7 +322,7 @@ async def on_deleted_business_messages(event: BusinessMessagesDeleted, bot: Bot,
             f"Чат: {chat_link}\n"
             f"От: <b>{html.escape(sender)}</b>\n"
             f"ID: <code>{message_id}</code>{flags}{origin_note}\n\n"
-            f"<b>Содержимое:</b>\n{html.escape(body)}"
+            f"<b>Содержимое:</b>\n{_safe_html(body)}"
         )
 
         # Одноразовые/защищённые медиа: Telegram не даёт скопировать их через API
@@ -459,18 +496,19 @@ async def _handle_owner_message(
     await _cache_message(message, bot, storage, connection_id)
 
     if command is None:
-        if settings.anti_search and message.text and not message.text.startswith("."):
+        if settings.murino_mode and message.text and not message.text.startswith("."):
+            await _apply_murino(message, bot, storage, connection_id)
+        elif settings.anti_search and message.text and not message.text.startswith("."):
             await _apply_antisearch(message, bot, storage, connection_id)
         elif settings.anon_stickers and message.sticker and not (message.sticker.is_animated or message.sticker.is_video):
             await _anonymize_sticker(message, bot, storage, connection_id)
-        elif settings.murino_mode and message.text and not message.text.startswith("."):
-            await _apply_murino(message, bot, storage, connection_id)
         return
 
     name = _command_name(command)
     flag = COMMAND_FLAG.get(name) if name else None
-    if flag and not getattr(settings, flag, True):
-        return  # команда выключена владельцем в /settings
+    is_admin = storage.is_admin(owner_id) if owner_id else False
+    if flag and not getattr(settings, flag, True) and not is_admin:
+        return  # команда выключена владельцем в /settings (для админов без ограничений)
 
     storage.mark_bot_deleted(connection_id, chat_id, message.message_id)
     try:
@@ -485,35 +523,53 @@ async def _dispatch(
     command, message: Message, bot: Bot, storage: Storage, connection_id: str, chat_id: int,
     settings, owner_id: int | None, http_session: aiohttp.ClientSession,
 ) -> None:
+    is_admin = storage.is_admin(owner_id) if owner_id else False
+
     if isinstance(command, SpamCommand):
-        if command.count > 50:
+        if not is_admin and command.count > 50:
             await _notify_owner(
                 bot, storage, connection_id,
                 "⚠️ <b>Лимит спама превышен.</b> Максимум 50 сообщений за раз (защита аккаунта от блокировки Telegram)."
             )
             return
-        if command.count > SPAM_CONFIRM_THRESHOLD:
+        if not is_admin and command.count > SPAM_CONFIRM_THRESHOLD:
             await _request_spam_confirmation(command, message, bot, storage, connection_id, chat_id, owner_id)
         else:
             await _run_spam(command, message, bot, storage, connection_id, chat_id, owner_id)
         return
 
     if isinstance(command, MuteCommand):
-        seconds = command.seconds if command.seconds is not None else settings.mute_default_seconds
-        storage.start_mute(connection_id, chat_id, seconds=seconds)
-        await _notify_owner(bot, storage, connection_id, f"🔇 Mute включён на <b>{seconds}</b> сек.")
-        kb = InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="🔊 Снять Mute", callback_data=f"unmute_chat:{chat_id}")]]
-        )
-        try:
-            await bot.send_message(
-                chat_id=chat_id,
-                text=f"🔇 <b>В этом чате включен Mute.</b> Входящие сообщения фильтруются ({seconds} сек).",
-                reply_markup=kb,
-                business_connection_id=connection_id,
+        if command.seconds is None:
+            storage.start_mute(connection_id, chat_id, seconds=None)
+            await _notify_owner(bot, storage, connection_id, "🔇 Mute включён <b>навсегда</b> (до ручной отмены / .unmute).")
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="🔊 Снять Mute", callback_data=f"unmute_chat:{chat_id}")]]
             )
-        except Exception:
-            logger.debug("Не удалось отправить сообщение об активации Mute в чат")
+            try:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text="🔇 <b>В этом чате включен Mute.</b> Входящие сообщения фильтруются (до ручной отмены).",
+                    reply_markup=kb,
+                    business_connection_id=connection_id,
+                )
+            except Exception:
+                logger.debug("Не удалось отправить сообщение об активации Mute в чат")
+        else:
+            seconds = command.seconds
+            storage.start_mute(connection_id, chat_id, seconds=seconds)
+            await _notify_owner(bot, storage, connection_id, f"🔇 Mute включён на <b>{seconds}</b> сек.")
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="🔊 Снять Mute", callback_data=f"unmute_chat:{chat_id}")]]
+            )
+            try:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=f"🔇 <b>В этом чате включен Mute.</b> Входящие сообщения фильтруются ({seconds} сек).",
+                    reply_markup=kb,
+                    business_connection_id=connection_id,
+                )
+            except Exception:
+                logger.debug("Не удалось отправить сообщение об активации Mute в чат")
         return
 
     if isinstance(command, UnmuteCommand):
@@ -537,17 +593,64 @@ async def _dispatch(
         return
 
     if isinstance(command, DelCommand):
-        recent = storage.recent_messages(connection_id, chat_id, command.count + 5)
-        msg_ids = [int(r["message_id"]) for r in recent if int(r["message_id"]) != message.message_id][:command.count]
+        del_count = command.count if is_admin else min(command.count, 100)
+        recent = storage.recent_messages(connection_id, chat_id, del_count + 10)
+        msg_ids = [int(r["message_id"]) for r in recent if int(r["message_id"]) != message.message_id][:del_count]
         if not msg_ids:
-            msg_ids = list(range(max(1, message.message_id - command.count), message.message_id))
-        for mid in msg_ids:
-            storage.mark_bot_deleted(connection_id, chat_id, mid)
+            msg_ids = list(range(max(1, message.message_id - del_count), message.message_id))
+        total_deleted = 0
+        for i in range(0, len(msg_ids), 100):
+            chunk = msg_ids[i:i + 100]
+            for mid in chunk:
+                storage.mark_bot_deleted(connection_id, chat_id, mid)
+            try:
+                await bot.delete_business_messages(business_connection_id=connection_id, message_ids=chunk)
+                total_deleted += len(chunk)
+            except Exception:
+                logger.exception("Ошибка при удалении порции сообщений в .del")
+        await _notify_owner(bot, storage, connection_id, f"🗑 Удалено <b>{total_deleted}</b> последних сообщений в чате.")
+        return
+
+    if isinstance(command, DelWordCommand):
+        pattern = command.word.strip()
+        matched_ids = storage.db.find_messages_matching(connection_id, chat_id, pattern, is_regex=False)
+        total_del = 0
+        for i in range(0, len(matched_ids), 100):
+            chunk = matched_ids[i:i + 100]
+            for mid in chunk:
+                storage.mark_bot_deleted(connection_id, chat_id, mid)
+            try:
+                await bot.delete_business_messages(business_connection_id=connection_id, message_ids=chunk)
+                total_del += len(chunk)
+            except Exception:
+                logger.exception("Ошибка удаления сообщений по слову")
+        await _notify_owner(
+            bot, storage, connection_id,
+            f"🗑 Найдено и удалено <b>{total_del}</b> сообщений, содержащих «{html.escape(pattern)}»."
+        )
+        return
+
+    if isinstance(command, DelRegexCommand):
+        pattern = command.pattern.strip()
         try:
-            await bot.delete_business_messages(business_connection_id=connection_id, message_ids=msg_ids)
-            await _notify_owner(bot, storage, connection_id, f"🗑 Удалено <b>{len(msg_ids)}</b> последних сообщений в чате.")
-        except Exception:
-            logger.exception("Не удалось выполнить .del")
+            matched_ids = storage.db.find_messages_matching(connection_id, chat_id, pattern, is_regex=True)
+        except Exception as exc:
+            await _notify_owner(bot, storage, connection_id, f"❌ Ошибка в регулярном выражении: {exc}")
+            return
+        total_del = 0
+        for i in range(0, len(matched_ids), 100):
+            chunk = matched_ids[i:i + 100]
+            for mid in chunk:
+                storage.mark_bot_deleted(connection_id, chat_id, mid)
+            try:
+                await bot.delete_business_messages(business_connection_id=connection_id, message_ids=chunk)
+                total_del += len(chunk)
+            except Exception:
+                logger.exception("Ошибка удаления сообщений по регулярке")
+        await _notify_owner(
+            bot, storage, connection_id,
+            f"🗑 Найдено и удалено <b>{total_del}</b> сообщений по регулярке <code>{html.escape(pattern)}</code>."
+        )
         return
 
     if isinstance(command, CloneCommand):

@@ -7,9 +7,8 @@ import tempfile
 import time
 from pathlib import Path
 
-from aiogram import F, Router
-from aiogram.filters import Command, CommandStart
-from aiogram.types import CallbackQuery, FSInputFile, Message
+from aiogram.enums import ChatAction
+from aiogram.types import CallbackQuery, FSInputFile, MenuButtonCommands, Message
 
 from bot.backup import BackupManager
 from bot.media import MEDIA_DIR, MediaRef, directory_size_bytes, extract_media, send_media_copy
@@ -21,8 +20,11 @@ from bot.keyboards import (
     admin_back_keyboard,
     admin_main_keyboard,
     admin_section_keyboard,
+    admin_user_detail_keyboard,
     admin_users_keyboard,
     admin_whitelist_keyboard,
+    chat_action_picker_keyboard,
+    chat_actions_menu_keyboard,
     chats_export_keyboard,
     chats_recent_keyboard,
     ghost_settings_keyboard,
@@ -30,6 +32,7 @@ from bot.keyboards import (
     help_topics_keyboard,
     menu_keyboard,
     notifications_keyboard,
+    online_menu_keyboard,
     persistent_menu_keyboard,
     preset_creation_keyboard,
     presets_keyboard,
@@ -83,6 +86,10 @@ async def cmd_start(message: Message, storage: Storage, texts: Texts) -> None:
     me = await message.bot.get_me()
     username = f"@{me.username}" if me.username else "имя бота из его профиля"
     text = texts.start.replace("{admin_hint}", "").replace("{bot_username}", username)
+    try:
+        await message.bot.set_chat_menu_button(chat_id=message.chat.id, menu_button=MenuButtonCommands())
+    except Exception:
+        pass
     await message.answer(text, reply_markup=persistent_menu_keyboard())
 
 
@@ -124,11 +131,11 @@ async def cmd_menu(message: Message, storage: Storage) -> None:
     status_icon = "🟢" if is_connected else "🔴"
     status_text = "Подключён" if is_connected else "Не подключён"
 
-    text = (
-        f"<b>🤖 AyuAutoBot — Меню</b>\n\n"
-        f"🔗 <b>Статус:</b> {status_icon} {status_text}\n\n"
-        "Выберите необходимый раздел:"
-    )
+    try:
+        await message.bot.set_chat_menu_button(chat_id=message.chat.id, menu_button=MenuButtonCommands())
+    except Exception:
+        pass
+    await message.answer("📱 Меню бота открыто:", reply_markup=persistent_menu_keyboard())
     await message.answer(text, reply_markup=menu_keyboard())
 
 
@@ -544,6 +551,161 @@ async def us_preset_cancel(call: CallbackQuery) -> None:
     await call.answer()
 
 
+# ----------------------------------------------------------- online mode
+async def _online_worker(bot: Bot, storage: Storage, owner_id: int, duration_sec: int | None) -> None:
+    end_time = (time.time() + duration_sec) if duration_sec else None
+    try:
+        while True:
+            if end_time and time.time() >= end_time:
+                break
+            conns = storage.connections_for_owner(owner_id)
+            for cid in conns:
+                chat_id = storage.owner_chat_id(cid)
+                if chat_id:
+                    with contextlib.suppress(Exception):
+                        await bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING, business_connection_id=cid)
+            await asyncio.sleep(4.5)
+    except asyncio.CancelledError:
+        pass
+    finally:
+        storage.stop_online(owner_id)
+
+
+@router.callback_query(F.data == "us:open:online")
+async def us_open_online(call: CallbackQuery, storage: Storage) -> None:
+    owner_id = call.from_user.id
+    is_active = storage.is_online(owner_id)
+    rem = storage.get_online_remaining_seconds(owner_id)
+    is_admin = storage.is_admin(owner_id)
+    if is_active:
+        if rem is None:
+            status = "🟢 <b>Онлайн-режим активен:</b> бессрочно"
+        else:
+            m, s = divmod(rem, 60)
+            status = f"🟢 <b>Онлайн-режим активен:</b> осталось {m}м {s}с"
+    else:
+        status = "⚪ <b>Онлайн-режим выключен.</b>\nВыберите желаемую длительность:"
+
+    text = (
+        f"🟢 <b>Имитация Online-статуса</b>\n\n"
+        f"{status}\n\n"
+        f"<i>Бот поддерживает видимость вашего аккаунта «в сети» через подключение Telegram Business.</i>"
+    )
+    await call.message.edit_text(text, reply_markup=online_menu_keyboard(is_active, rem, is_admin))
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("us:online:start:"))
+async def us_online_start(call: CallbackQuery, storage: Storage) -> None:
+    owner_id = call.from_user.id
+    duration = int(call.data.split(":", 3)[3])
+    duration_sec = duration if duration > 0 else None
+    is_admin = storage.is_admin(owner_id)
+    if not is_admin and duration_sec and duration_sec > 3600:
+        duration_sec = 3600
+
+    task = asyncio.create_task(_online_worker(call.bot, storage, owner_id, duration_sec))
+    storage.start_online(owner_id, duration_sec, task)
+    await call.answer("Онлайн-режим запущен!", show_alert=False)
+    await us_open_online(call, storage)
+
+
+@router.callback_query(F.data == "us:online:stop")
+async def us_online_stop(call: CallbackQuery, storage: Storage) -> None:
+    owner_id = call.from_user.id
+    storage.stop_online(owner_id)
+    await call.answer("Онлайн-режим остановлен")
+    await us_open_online(call, storage)
+
+
+# ----------------------------------------------------------- secret chat actions
+@router.callback_query(F.data == "us:open:actions")
+async def us_open_actions(call: CallbackQuery, storage: Storage) -> None:
+    owner_id = call.from_user.id
+    chats = storage.recent_chats(owner_id)
+    text = (
+        "⚡️ <b>Действия над чатом (Скрытый режим)</b>\n\n"
+        "Здесь вы можете выполнять команды (Mute, спам, удаление, typing, клонирование) "
+        "<b>напрямую из меню бота</b>, чтобы в чате с собеседником не мелькали точки и служебные сообщения!\n\n"
+        "Выберите недавний диалог или укажите Chat ID вручную:"
+    )
+    chat_list = [{"chat_id": cid, "title": st.title} for cid, st in chats]
+    await call.message.edit_text(text, reply_markup=chat_actions_menu_keyboard(chat_list))
+    await call.answer()
+
+
+@router.callback_query(F.data == "act:manual")
+async def act_manual(call: CallbackQuery, storage: Storage) -> None:
+    _pending[call.from_user.id] = {"kind": "act_manual_chat", "created_at": time.time()}
+    await call.answer()
+    await call.message.answer("Введите числовой Chat ID целевого собеседника:")
+
+
+@router.callback_query(F.data.startswith("act:chat:"))
+async def act_chat_pick(call: CallbackQuery, storage: Storage) -> None:
+    chat_id = int(call.data.split(":", 2)[2])
+    text = f"⚙️ <b>Управление чатом</b> <code>{chat_id}</code>:\n\nВыберите действие:"
+    await call.message.edit_text(text, reply_markup=chat_action_picker_keyboard(chat_id))
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("act:do:"))
+async def act_execute(call: CallbackQuery, storage: Storage) -> None:
+    parts = call.data.split(":")
+    action = parts[2]
+    chat_id = int(parts[3])
+    owner_id = call.from_user.id
+    conns = storage.connections_for_owner(owner_id)
+    if not conns:
+        await call.answer("Нет подключённого Telegram Business", show_alert=True)
+        return
+    conn_id = conns[0]
+
+    if action == "mute_perm":
+        storage.start_mute(conn_id, chat_id, seconds=None)
+        await call.answer("🔇 Mute включён навсегда", show_alert=True)
+        return
+    if action == "mute_1h":
+        storage.start_mute(conn_id, chat_id, seconds=3600)
+        await call.answer("🔇 Mute включён на 1 час", show_alert=True)
+        return
+    if action == "unmute":
+        storage.stop_mute(conn_id, chat_id)
+        await call.answer("🔊 Mute выключен", show_alert=True)
+        return
+    if action == "typing":
+        await call.answer("⌨️ Отправлен статус typing")
+        try:
+            await call.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING, business_connection_id=conn_id)
+        except Exception:
+            pass
+        return
+    if action == "clone":
+        await call.answer("👤 Клонирование…")
+        try:
+            from bot.handlers.business import _run_clone
+            await _run_clone(call.bot, storage, conn_id, owner_id, str(chat_id))
+            await call.message.answer("✅ Профиль собеседника скопирован!")
+        except Exception as exc:
+            await call.message.answer(f"❌ Ошибка клонирования: {exc}")
+        return
+    if action == "del":
+        _pending[owner_id] = {"kind": "act_del_count", "chat_id": chat_id, "conn_id": conn_id, "created_at": time.time()}
+        await call.answer()
+        await call.message.answer("Сколько последних сообщений удалить из чата? (например 10):")
+        return
+    if action == "spam":
+        _pending[owner_id] = {"kind": "act_spam_prompt", "chat_id": chat_id, "conn_id": conn_id, "created_at": time.time()}
+        await call.answer()
+        await call.message.answer("Отправьте сообщение для спама (текст или медиа):")
+        return
+    if action == "delword":
+        _pending[owner_id] = {"kind": "act_delword_prompt", "chat_id": chat_id, "conn_id": conn_id, "created_at": time.time()}
+        await call.answer()
+        await call.message.answer("Введите слово или регулярное выражение (/регулярка/) для удаления сообщений:")
+        return
+
+
 # -------------------------------------------------------------------------- /admin
 def _admin_overview_text(storage: Storage, backup: BackupManager) -> str:
     settings = storage.get_global()
@@ -607,11 +769,11 @@ async def ad_open(call: CallbackQuery, storage: Storage) -> None:
             await call.message.edit_text(text, reply_markup=admin_back_keyboard())
         else:
             text = (
-                f"<b>👥 Нагрузка по пользователям за 48 часов ({len(owners)})</b>\n"
-                "<i>Формат: [Статус ID | 48h: Сообщений | Медиа (Размер на диске)]\n"
-                "Нажмите «Забанить», если пользователь создаёт чрезмерную нагрузку.</i>"
+                f"<b>👥 Пользователи бота ({len(owners)})</b>\n\n"
+                "Нажмите на пользователя для просмотра подробной статистики и управления доступом:\n"
+                "🟢 — подключён | ⚪ — не подключён | ⭐ — админ | 🔴 — бан"
             )
-            await call.message.edit_text(text, reply_markup=admin_users_keyboard(owners))
+            await call.message.edit_text(text, reply_markup=admin_users_keyboard(owners, page=1))
         await call.answer()
         return
 
@@ -737,17 +899,90 @@ async def ad_clean_manual(call: CallbackQuery, storage: Storage) -> None:
 
 
 @router.callback_query(F.data.startswith("ad:user:ban:"))
+@router.callback_query(F.data.startswith("ad:users:page:"))
+async def ad_users_page(call: CallbackQuery, storage: Storage) -> None:
+    if not storage.is_admin(call.from_user.id):
+        await call.answer()
+        return
+    page = int(call.data.split(":", 3)[3])
+    owners = storage.all_owners_with_stats()
+    text = (
+        f"<b>👥 Пользователи бота ({len(owners)})</b>\n\n"
+        "Нажмите на пользователя для просмотра подробной статистики и управления доступом:\n"
+        "🟢 — подключён | ⚪ — не подключён | ⭐ — админ | 🔴 — бан"
+    )
+    await call.message.edit_text(text, reply_markup=admin_users_keyboard(owners, page=page))
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("ad:user:view:"))
+async def ad_user_view(call: CallbackQuery, storage: Storage) -> None:
+    if not storage.is_admin(call.from_user.id):
+        await call.answer()
+        return
+    uid = int(call.data.split(":", 3)[3])
+    details = storage.db.get_owner_details(uid)
+    if not details:
+        await call.answer("Пользователь не найден", show_alert=True)
+        return
+    is_admin = storage.is_admin(uid)
+    is_banned = bool(details.get("is_banned", False))
+    conns = details.get("connections", [])
+    active_conns = sum(1 for c in conns if c.get("is_enabled"))
+    name = details.get("full_name") or "Без имени"
+    uname = f"@{details['username']}" if details.get("username") else "отсутствует"
+    reg_date = time.strftime("%d.%m.%Y %H:%M", time.localtime(details.get("created_at", time.time())))
+    last_seen = time.strftime("%d.%m.%Y %H:%M", time.localtime(details.get("last_seen", time.time())))
+
+    conn_ids = [c["connection_id"] for c in conns]
+    total_media_bytes = 0
+    for cid in conn_ids:
+        total_media_bytes += directory_size_bytes(MEDIA_DIR / cid)
+    media_mb = total_media_bytes / (1024 * 1024)
+
+    status = "🔴 ЗАБАНЕН" if is_banned else ("⭐ Администратор" if is_admin else ("🟢 Подключён" if active_conns else "⚪ Не подключён"))
+
+    text = (
+        f"👤 <b>Статистика пользователя</b>\n\n"
+        f"• <b>Имя:</b> {html.escape(name)}\n"
+        f"• <b>Username:</b> {uname}\n"
+        f"• <b>Telegram ID:</b> <code>{uid}</code>\n"
+        f"• <b>Статус:</b> {status}\n\n"
+        f"📅 <b>Первый запуск:</b> {reg_date}\n"
+        f"👀 <b>Был в сети:</b> {last_seen}\n\n"
+        f"🔗 <b>Telegram Business:</b> {active_conns} акк. (всего {len(conns)})\n"
+        f"💬 <b>Сообщений в БД:</b> <b>{details['messages_total']}</b>\n"
+        f"✏️ <b>Правок:</b> <b>{details['edits_total']}</b> · 🗑 <b>Удалений:</b> <b>{details['deletes_total']}</b>\n"
+        f"🖼 <b>Медиафайлов:</b> <b>{details['media_count']}</b> ({media_mb:.1f} МБ)"
+    )
+    await call.message.edit_text(text, reply_markup=admin_user_detail_keyboard(uid, is_banned, is_admin))
+    await call.answer()
+
+
+@router.callback_query(F.data == "ad:user:find")
+async def ad_user_find(call: CallbackQuery, storage: Storage) -> None:
+    if not storage.is_admin(call.from_user.id):
+        await call.answer()
+        return
+    _pending[call.from_user.id] = {"kind": "find_user", "created_at": time.time()}
+    await call.answer()
+    await call.message.answer("Введите числовой Telegram ID пользователя для просмотра статистики:")
+
+
+@router.callback_query(F.data.startswith("ad:user:ban:"))
 async def ad_user_ban(call: CallbackQuery, storage: Storage) -> None:
     if not storage.is_admin(call.from_user.id):
         await call.answer()
         return
-    target_id = int(call.data.split(":", 3)[3])
+    parts = call.data.split(":")
+    target_id = int(parts[3])
+    page = int(parts[4]) if len(parts) > 4 else 1
     if target_id == call.from_user.id:
         await call.answer("Себя забанить нельзя", show_alert=True)
         return
     storage.ban_user(target_id)
     owners = storage.all_owners_with_stats()
-    await call.message.edit_reply_markup(reply_markup=admin_users_keyboard(owners))
+    await call.message.edit_reply_markup(reply_markup=admin_users_keyboard(owners, page=page))
     await call.answer(f"🚫 Пользователь {target_id} забанен")
 
 
@@ -756,10 +991,12 @@ async def ad_user_unban(call: CallbackQuery, storage: Storage) -> None:
     if not storage.is_admin(call.from_user.id):
         await call.answer()
         return
-    target_id = int(call.data.split(":", 3)[3])
+    parts = call.data.split(":")
+    target_id = int(parts[3])
+    page = int(parts[4]) if len(parts) > 4 else 1
     storage.unban_user(target_id)
     owners = storage.all_owners_with_stats()
-    await call.message.edit_reply_markup(reply_markup=admin_users_keyboard(owners))
+    await call.message.edit_reply_markup(reply_markup=admin_users_keyboard(owners, page=page))
     await call.answer(f"✅ Пользователь {target_id} разбанен")
 
 
@@ -945,35 +1182,159 @@ async def private_input(message: Message, storage: Storage) -> None:
         if not storage.is_admin(user_id):
             _pending.pop(user_id, None)
             return
-        text = message.text or message.caption
-        if not text:
-            await message.answer("❌ Поддерживается только текст. Попробуйте ещё раз:")
-            return
         _pending.pop(user_id, None)
-        rows = storage.db.all_connections()
+        html_text = message.html_text or message.html_caption or (f"📢 {message.text}" if message.text else "")
+        owners = storage.db.all_owners()
         sent = 0
-        for row in rows:
+        for row in owners:
+            target_chat_id = int(row["owner_id"])
             try:
-                await message.bot.send_message(chat_id=row["user_chat_id"], text=f"📢 {text}")
+                if message.photo:
+                    await message.bot.send_photo(chat_id=target_chat_id, photo=message.photo[-1].file_id, caption=html_text)
+                elif message.video:
+                    await message.bot.send_video(chat_id=target_chat_id, video=message.video.file_id, caption=html_text)
+                elif message.document:
+                    await message.bot.send_document(chat_id=target_chat_id, document=message.document.file_id, caption=html_text)
+                elif message.voice:
+                    await message.bot.send_voice(chat_id=target_chat_id, voice=message.voice.file_id, caption=html_text)
+                elif message.sticker:
+                    await message.bot.send_sticker(chat_id=target_chat_id, sticker=message.sticker.file_id)
+                elif html_text:
+                    await message.bot.send_message(chat_id=target_chat_id, text=html_text)
                 sent += 1
             except Exception:
-                logger.exception("Не удалось отправить рассылку owner=%s", row["owner_id"])
-        await message.answer(f"Отправлено {sent} из {len(rows)}.")
+                pass
+        await message.answer(f"✅ Рассылка завершена: отправлено {sent} из {len(owners)}.")
         return
 
-    if kind == "whitelist_add":
-        if not storage.is_admin(user_id):
-            _pending.pop(user_id, None)
-            return
-        parts = (message.text or "").strip().split(maxsplit=1)
-        if not parts or not parts[0].lstrip("-").isdigit():
-            await message.answer("❌ Введите корректный числовой Telegram ID.")
-            return
-        target_id = int(parts[0])
-        note = parts[1] if len(parts) > 1 else ""
-        storage.whitelist_add(target_id, note)
+    if kind == "find_user":
         _pending.pop(user_id, None)
-        await message.answer(f"✅ ID <code>{target_id}</code> добавлен в белый список.")
+        raw = (message.text or "").strip()
+        if not raw.isdigit():
+            await message.answer("❌ ID должен состоять только из цифр.")
+            return
+        target_uid = int(raw)
+        details = storage.db.get_owner_details(target_uid)
+        if not details:
+            await message.answer(f"❌ Пользователь с ID <code>{target_uid}</code> не найден.")
+            return
+        is_admin_target = storage.is_admin(target_uid)
+        is_banned_target = bool(details.get("is_banned", False))
+        conns = details.get("connections", [])
+        active_conns = sum(1 for c in conns if c.get("is_enabled"))
+        name = details.get("full_name") or "Без имени"
+        uname = f"@{details['username']}" if details.get("username") else "отсутствует"
+        reg_date = time.strftime("%d.%m.%Y %H:%M", time.localtime(details.get("created_at", time.time())))
+        last_seen = time.strftime("%d.%m.%Y %H:%M", time.localtime(details.get("last_seen", time.time())))
+        status = "🔴 ЗАБАНЕН" if is_banned_target else ("⭐ Администратор" if is_admin_target else ("🟢 Подключён" if active_conns else "⚪ Не подключён"))
+
+        text = (
+            f"👤 <b>Статистика пользователя</b>\n\n"
+            f"• <b>Имя:</b> {html.escape(name)}\n"
+            f"• <b>Username:</b> {uname}\n"
+            f"• <b>Telegram ID:</b> <code>{target_uid}</code>\n"
+            f"• <b>Статус:</b> {status}\n\n"
+            f"📅 <b>Первый запуск:</b> {reg_date}\n"
+            f"👀 <b>Был в сети:</b> {last_seen}\n\n"
+            f"🔗 <b>Telegram Business:</b> {active_conns} акк. (всего {len(conns)})\n"
+            f"💬 <b>Сообщений в БД:</b> <b>{details['messages_total']}</b>\n"
+            f"✏️ <b>Правок:</b> <b>{details['edits_total']}</b> · 🗑 <b>Удалений:</b> <b>{details['deletes_total']}</b>\n"
+            f"🖼 <b>Медиафайлов:</b> <b>{details['media_count']}</b>"
+        )
+        await message.answer(text, reply_markup=admin_user_detail_keyboard(target_uid, is_banned_target, is_admin_target))
+        return
+
+    if kind == "act_manual_chat":
+        _pending.pop(user_id, None)
+        raw = (message.text or "").strip()
+        if not raw.lstrip("-").isdigit():
+            await message.answer("❌ Введите корректный числовой Chat ID.")
+            return
+        target_chat = int(raw)
+        text = f"⚙️ <b>Управление чатом</b> <code>{target_chat}</code>:\n\nВыберите действие:"
+        await message.answer(text, reply_markup=chat_action_picker_keyboard(target_chat))
+        return
+
+    if kind == "act_del_count":
+        chat_id = state["chat_id"]
+        conn_id = state["conn_id"]
+        _pending.pop(user_id, None)
+        raw = (message.text or "").strip()
+        if not raw.isdigit() or int(raw) <= 0:
+            await message.answer("❌ Введите положительное число.")
+            return
+        cnt = int(raw)
+        is_admin = storage.is_admin(user_id)
+        if not is_admin:
+            cnt = min(cnt, 100)
+        recent = storage.recent_messages(conn_id, chat_id, cnt + 10)
+        msg_ids = [int(r["message_id"]) for r in recent][:cnt]
+        total_del = 0
+        for i in range(0, len(msg_ids), 100):
+            chunk = msg_ids[i:i + 100]
+            for mid in chunk:
+                storage.mark_bot_deleted(conn_id, chat_id, mid)
+            try:
+                await message.bot.delete_business_messages(business_connection_id=conn_id, message_ids=chunk)
+                total_del += len(chunk)
+            except Exception:
+                pass
+        await message.answer(f"🗑 Удалено <b>{total_del}</b> сообщений в чате <code>{chat_id}</code>.")
+        return
+
+    if kind == "act_delword_prompt":
+        chat_id = state["chat_id"]
+        conn_id = state["conn_id"]
+        _pending.pop(user_id, None)
+        pattern = (message.text or "").strip()
+        if not pattern:
+            await message.answer("❌ Шаблон пуст.")
+            return
+        is_regex = pattern.startswith("/") and pattern.endswith("/") and len(pattern) > 2
+        if is_regex:
+            pattern = pattern[1:-1]
+        try:
+            matched_ids = storage.db.find_messages_matching(conn_id, chat_id, pattern, is_regex=is_regex)
+        except Exception as exc:
+            await message.answer(f"❌ Ошибка в регулярке: {exc}")
+            return
+        total_del = 0
+        for i in range(0, len(matched_ids), 100):
+            chunk = matched_ids[i:i + 100]
+            for mid in chunk:
+                storage.mark_bot_deleted(conn_id, chat_id, mid)
+            try:
+                await message.bot.delete_business_messages(business_connection_id=conn_id, message_ids=chunk)
+                total_del += len(chunk)
+            except Exception:
+                pass
+        await message.answer(f"🗑 Удалено <b>{total_del}</b> сообщений в чате <code>{chat_id}</code> по фильтру «{html.escape(pattern)}».")
+        return
+
+    if kind == "act_spam_prompt":
+        chat_id = state["chat_id"]
+        conn_id = state["conn_id"]
+        _pending.pop(user_id, None)
+        count = 5
+        is_admin = storage.is_admin(user_id)
+        if not is_admin:
+            count = min(count, 50)
+        sent = 0
+        for _ in range(count):
+            try:
+                if message.photo:
+                    await message.bot.send_photo(chat_id=chat_id, photo=message.photo[-1].file_id, caption=message.caption, business_connection_id=conn_id)
+                elif message.sticker:
+                    await message.bot.send_sticker(chat_id=chat_id, sticker=message.sticker.file_id, business_connection_id=conn_id)
+                elif message.video:
+                    await message.bot.send_video(chat_id=chat_id, video=message.video.file_id, caption=message.caption, business_connection_id=conn_id)
+                elif message.text:
+                    await message.bot.send_message(chat_id=chat_id, text=message.text, business_connection_id=conn_id)
+                sent += 1
+            except Exception:
+                break
+            await asyncio.sleep(0.3)
+        await message.answer(f"💣 Спам отправлен: <b>{sent}</b> сообщений.")
         return
 
 

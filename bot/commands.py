@@ -79,6 +79,16 @@ class DelCommand:
 
 
 @dataclass(frozen=True, slots=True)
+class DelWordCommand:
+    word: str
+
+
+@dataclass(frozen=True, slots=True)
+class DelRegexCommand:
+    pattern: str
+
+
+@dataclass(frozen=True, slots=True)
 class CloneCommand:
     target: str
 
@@ -118,6 +128,8 @@ Command = (
     | UnwatchCommand
     | TrollCommand
     | DelCommand
+    | DelWordCommand
+    | DelRegexCommand
     | CloneCommand
     | ToNoteCommand
     | ToVoiceCommand
@@ -128,6 +140,8 @@ Command = (
 _SPAM_RE = re.compile(r"^\.spam\s+(\d+)(?:\s+(.+))?$", re.DOTALL | re.IGNORECASE)
 _TROLL_RE = re.compile(r"^\.troll(?:\s+(\d+))?$", re.IGNORECASE)
 _DEL_RE = re.compile(r"^\.del\s+(\d+)$", re.IGNORECASE)
+_DELWORD_RE = re.compile(r"^\.delword\s+(.+)$", re.DOTALL | re.IGNORECASE)
+_DELREGEX_RE = re.compile(r"^\.delregex\s+(.+)$", re.DOTALL | re.IGNORECASE)
 _CLONE_RE = re.compile(r"^\.clone\s+(\S+)$", re.IGNORECASE)
 _TONOTE_RE = re.compile(r"^\.tonote$", re.IGNORECASE)
 _TOVOICE_RE = re.compile(r"^\.tovoice$", re.IGNORECASE)
@@ -182,7 +196,13 @@ def parse_command(text: str | None) -> Command | None:
         count = int(match.group(1))
         if count <= 0:
             return None
-        return DelCommand(count=min(count, 100))
+        return DelCommand(count=count)
+
+    if match := _DELWORD_RE.match(text):
+        return DelWordCommand(word=match.group(1).strip())
+
+    if match := _DELREGEX_RE.match(text):
+        return DelRegexCommand(pattern=match.group(1).strip())
 
     if match := _CLONE_RE.match(text):
         return CloneCommand(target=match.group(1).strip())

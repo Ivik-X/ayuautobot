@@ -21,8 +21,22 @@ class Database:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        self._register_functions()
         self._init_schema()
         self._migrate()
+
+    def _register_functions(self) -> None:
+        import re
+
+        def _regexp(pattern: str, text: str | None) -> bool:
+            if text is None:
+                return False
+            try:
+                return bool(re.search(pattern, text, re.IGNORECASE))
+            except Exception:
+                return False
+
+        self._conn.create_function("REGEXP", 2, _regexp)
 
     def close(self) -> None:
         self._conn.close()
@@ -42,6 +56,9 @@ class Database:
                 owner_id      INTEGER PRIMARY KEY,
                 settings      TEXT NOT NULL DEFAULT '{}',
                 is_admin      INTEGER NOT NULL DEFAULT 0,
+                is_banned     INTEGER NOT NULL DEFAULT 0,
+                full_name     TEXT,
+                username      TEXT,
                 created_at    REAL NOT NULL,
                 last_seen     REAL NOT NULL
             );
@@ -222,24 +239,60 @@ class Database:
             logger.info("Миграция БД: добавляю колонку watched_profiles.bio")
             self._conn.execute("ALTER TABLE watched_profiles ADD COLUMN bio TEXT")
             self._conn.commit()
+        # Колонка is_banned в таблице owners
+        owner_cols = {row["name"] for row in self._conn.execute("PRAGMA table_info(owners)").fetchall()}
+        if "is_banned" not in owner_cols:
+            logger.info("Миграция БД: добавляю колонку owners.is_banned")
+            self._conn.execute("ALTER TABLE owners ADD COLUMN is_banned INTEGER NOT NULL DEFAULT 0")
+            self._conn.commit()
+        if "full_name" not in owner_cols:
+            logger.info("Миграция БД: добавляю колонку owners.full_name")
+            self._conn.execute("ALTER TABLE owners ADD COLUMN full_name TEXT")
+            self._conn.commit()
+        if "username" not in owner_cols:
+            logger.info("Миграция БД: добавляю колонку owners.username")
+            self._conn.execute("ALTER TABLE owners ADD COLUMN username TEXT")
+            self._conn.commit()
+
+        # Если в сохранённых глобальных настройках стоял старый 48-часовой или 168-часовой TTL сообщений,
+        # сбрасываем его на 0.0 (бессрочно, до переполнения квоты), чтобы не удалять историю пользователей.
+        try:
+            raw_g = self.get_global_settings_raw()
+            if raw_g:
+                gdata = json.loads(raw_g)
+                if gdata.get("media_max_age_hours") in (48.0, 168.0, 48, 168):
+                    gdata["media_max_age_hours"] = 0.0
+                    self.save_global_settings(json.dumps(gdata, ensure_ascii=False))
+        except Exception:
+            pass
+
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_owner ON messages(owner_id)")
         self._conn.commit()
 
     # ------------------------------------------------------------------ owners
-    def ensure_owner(self, owner_id: int, *, is_admin: bool = False) -> bool:
-        """Гарантирует наличие записи в владельце. Возвращает True, если зарегистрирован НОВЫЙ пользователь."""
+    def ensure_owner(
+        self,
+        owner_id: int,
+        *,
+        is_admin: bool = False,
+        full_name: str | None = None,
+        username: str | None = None,
+    ) -> bool:
+        """Гарантирует наличие записи о владельце. Возвращает True, если зарегистрирован НОВЫЙ пользователь."""
         row = self._conn.execute("SELECT 1 FROM owners WHERE owner_id=?", (owner_id,)).fetchone()
         is_new = row is None
         now = time.time()
         self._conn.execute(
             """
-            INSERT INTO owners (owner_id, settings, is_admin, created_at, last_seen)
-            VALUES (?, '{}', ?, ?, ?)
+            INSERT INTO owners (owner_id, settings, is_admin, full_name, username, created_at, last_seen)
+            VALUES (?, '{}', ?, ?, ?, ?, ?)
             ON CONFLICT(owner_id) DO UPDATE SET
                 last_seen = excluded.last_seen,
-                is_admin = MAX(owners.is_admin, excluded.is_admin)
+                is_admin = MAX(owners.is_admin, excluded.is_admin),
+                full_name = COALESCE(excluded.full_name, owners.full_name),
+                username = COALESCE(excluded.username, owners.username)
             """,
-            (owner_id, int(is_admin), now, now),
+            (owner_id, int(is_admin), full_name, username, now, now),
         )
         self._conn.commit()
         return is_new
@@ -372,7 +425,7 @@ class Database:
         """Returns owners with resource usage statistics over the last 48 hours."""
         rows = self._conn.execute(
             """
-            SELECT o.owner_id, o.is_admin, o.is_banned, o.created_at, o.last_seen,
+            SELECT o.owner_id, o.is_admin, o.is_banned, o.full_name, o.username, o.created_at, o.last_seen,
                    COUNT(DISTINCT c.connection_id) AS connections,
                    COUNT(m.message_id) AS total_messages,
                    SUM(CASE WHEN m.cached_at >= ? THEN 1 ELSE 0 END) AS msgs_48h,
@@ -388,6 +441,35 @@ class Database:
             (cutoff_ts, cutoff_ts, cutoff_ts, cutoff_ts),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def get_owner_details(self, owner_id: int) -> dict | None:
+        o = self._conn.execute(
+            "SELECT owner_id, is_admin, is_banned, full_name, username, created_at, last_seen FROM owners WHERE owner_id=?",
+            (owner_id,),
+        ).fetchone()
+        if not o:
+            return None
+        data = dict(o)
+        conns = self._conn.execute(
+            "SELECT connection_id, is_enabled, updated_at FROM connections WHERE owner_id=?",
+            (owner_id,),
+        ).fetchall()
+        data["connections"] = [dict(c) for c in conns]
+        msgs = self._conn.execute(
+            """
+            SELECT COUNT(*) AS total,
+                   SUM(CASE WHEN deleted_at IS NOT NULL THEN 1 ELSE 0 END) AS deletes,
+                   SUM(CASE WHEN edited_at IS NOT NULL THEN 1 ELSE 0 END) AS edits,
+                   SUM(CASE WHEN media_kind IS NOT NULL THEN 1 ELSE 0 END) AS media_count
+            FROM messages WHERE owner_id=?
+            """,
+            (owner_id,),
+        ).fetchone()
+        data["messages_total"] = msgs["total"] or 0
+        data["deletes_total"] = msgs["deletes"] or 0
+        data["edits_total"] = msgs["edits"] or 0
+        data["media_count"] = msgs["media_count"] or 0
+        return data
 
 
     def ban_user(self, owner_id: int) -> None:
@@ -672,9 +754,17 @@ class Database:
         self._conn.commit()
         return len(rows)
 
-    def purge_messages_older_than(self, hours: float = 168.0) -> int:
+    def count_messages_for_chat(self, connection_id: str, chat_id: int) -> int:
+        """Возвращает число НЕ удалённых сообщений для указанного чата."""
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM messages WHERE connection_id=? AND chat_id=? AND deleted_at IS NULL",
+            (connection_id, chat_id),
+        ).fetchone()
+        return int(row[0]) if row else 0
+
+    def purge_messages_older_than(self, hours: float = 0.0) -> int:
         """Удаляет из БД полностью записи сообщений и медиафайлы, если они старше hours часов.
-        По умолчанию 168.0 часов = 7 дней (неделя).
+        При hours=0 (по умолчанию) ничего не удаляет — хранит всё до срабатывания лимита размера БД.
         """
         if hours <= 0:
             return 0
@@ -691,18 +781,103 @@ class Database:
         self._conn.commit()
         return removed
 
-    def search_messages(self, owner_id: int, query: str, limit: int = 15) -> list[sqlite3.Row]:
-        pattern = f"%{query.strip()}%"
+    def search_messages(self, owner_id: int, query: str, limit: int = 20) -> list[sqlite3.Row]:
+        query_str = query.strip()
+        if not query_str:
+            return []
+
+        # 1. Поиск по ID (id:123, #123 или просто число)
+        id_query = None
+        if query_str.startswith("id:"):
+            raw_id = query_str[3:].strip()
+            if raw_id.lstrip("-").isdigit():
+                id_query = int(raw_id)
+        elif query_str.startswith("#") and query_str[1:].isdigit():
+            id_query = int(query_str[1:])
+        elif query_str.lstrip("-").isdigit() and len(query_str) <= 15:
+            id_query = int(query_str)
+
+        if id_query is not None:
+            return self._conn.execute(
+                """
+                SELECT connection_id, chat_id, chat_title, message_id, from_user_name, content, cached_at, media_kind, deleted_at, edited_at
+                FROM messages
+                WHERE owner_id = ? AND (message_id = ? OR chat_id = ? OR from_user_id = ?)
+                ORDER BY cached_at DESC
+                LIMIT ?
+                """,
+                (owner_id, id_query, id_query, id_query, limit),
+            ).fetchall()
+
+        # 2. Регулярные выражения (re:... или /.../)
+        is_regex = False
+        regex_pat = query_str
+        if query_str.startswith("re:") or query_str.startswith("regex:"):
+            is_regex = True
+            regex_pat = query_str.split(":", 1)[1].strip()
+        elif query_str.startswith("/") and query_str.endswith("/") and len(query_str) > 2:
+            is_regex = True
+            regex_pat = query_str[1:-1]
+
+        if is_regex:
+            return self._conn.execute(
+                """
+                SELECT connection_id, chat_id, chat_title, message_id, from_user_name, content, cached_at, media_kind, deleted_at, edited_at
+                FROM messages
+                WHERE owner_id = ? AND (
+                    content REGEXP ? OR
+                    media_file_name REGEXP ? OR
+                    media_kind REGEXP ? OR
+                    media_file_id REGEXP ?
+                )
+                ORDER BY cached_at DESC
+                LIMIT ?
+                """,
+                (owner_id, regex_pat, regex_pat, regex_pat, regex_pat, limit),
+            ).fetchall()
+
+        # 3. Текстовый поиск + поиск по имени медиафайла, типу, file_id, отправителю
+        pattern = f"%{query_str}%"
         return self._conn.execute(
             """
             SELECT connection_id, chat_id, chat_title, message_id, from_user_name, content, cached_at, media_kind, deleted_at, edited_at
             FROM messages
-            WHERE owner_id = ? AND content LIKE ?
+            WHERE owner_id = ? AND (
+                content LIKE ? OR
+                media_file_name LIKE ? OR
+                media_kind LIKE ? OR
+                media_file_id LIKE ? OR
+                from_user_name LIKE ? OR
+                chat_title LIKE ?
+            )
             ORDER BY cached_at DESC
             LIMIT ?
             """,
-            (owner_id, pattern, limit),
+            (owner_id, pattern, pattern, pattern, pattern, pattern, pattern, limit),
         ).fetchall()
+
+    def find_messages_matching(
+        self, connection_id: str, chat_id: int, pattern: str, *, is_regex: bool = False
+    ) -> list[int]:
+        """Возвращает список ID сообщений чата, текст или медиа которых совпадают с шаблоном/регуляркой."""
+        if is_regex:
+            rows = self._conn.execute(
+                """
+                SELECT message_id FROM messages
+                WHERE connection_id = ? AND chat_id = ? AND deleted_at IS NULL AND (content REGEXP ? OR media_file_name REGEXP ?)
+                """,
+                (connection_id, chat_id, pattern, pattern),
+            ).fetchall()
+        else:
+            like_pat = f"%{pattern}%"
+            rows = self._conn.execute(
+                """
+                SELECT message_id FROM messages
+                WHERE connection_id = ? AND chat_id = ? AND deleted_at IS NULL AND (content LIKE ? OR media_file_name LIKE ?)
+                """,
+                (connection_id, chat_id, like_pat, like_pat),
+            ).fetchall()
+        return [int(r["message_id"]) for r in rows]
 
     def purge_older_than(self, hours: float) -> int:
         """Делегирует в purge_messages_older_than."""
