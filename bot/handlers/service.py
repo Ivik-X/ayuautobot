@@ -7,7 +7,9 @@ import tempfile
 import time
 from pathlib import Path
 
+from aiogram import Bot, F, Router
 from aiogram.enums import ChatAction
+from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, FSInputFile, MenuButtonCommands, Message
 
 from bot.backup import BackupManager
