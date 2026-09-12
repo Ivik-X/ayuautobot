@@ -135,11 +135,16 @@ async def cmd_menu(message: Message, storage: Storage) -> None:
     status_icon = "🟢" if is_connected else "🔴"
     status_text = "Подключён" if is_connected else "Не подключён"
 
+    text = (
+        f"<b>🤖 AyuAutoBot — Меню</b>\n\n"
+        f"🔗 <b>Статус:</b> {status_icon} {status_text}\n\n"
+        "Выберите необходимый раздел:"
+    )
+
     try:
         await message.bot.set_chat_menu_button(chat_id=message.chat.id, menu_button=MenuButtonCommands())
     except Exception:
         pass
-    await message.answer("📱 Меню бота открыто:", reply_markup=persistent_menu_keyboard())
     await message.answer(text, reply_markup=menu_keyboard())
 
 

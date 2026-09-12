@@ -99,8 +99,10 @@ async def main() -> None:
     dp.include_router(business.router)
 
     @dp.errors()
-    async def global_error_handler(event, exception: Exception) -> bool:
-        logger.exception("Необработанная ошибка при обработке апдейта %s: %s", event, exception)
+    async def global_error_handler(event) -> bool:
+        exc = getattr(event, "exception", event)
+        upd = getattr(event, "update", None)
+        logger.exception("Необработанная ошибка при обработке апдейта %s: %s", upd, exc)
         return True
 
     background_tasks = [
