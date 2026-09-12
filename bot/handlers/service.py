@@ -11,7 +11,7 @@ from aiogram.enums import ChatAction
 from aiogram.types import CallbackQuery, FSInputFile, MenuButtonCommands, Message
 
 from bot.backup import BackupManager
-from bot.media import MEDIA_DIR, MediaRef, directory_size_bytes, extract_media, send_media_copy
+from bot.media import MEDIA_DIR, MediaRef, compute_media_hash, directory_size_bytes, download_bytes, extract_media, send_media_copy
 from bot import ghost, subscription
 from bot.handlers import billing as billing_handlers
 from bot.handlers import ghost as ghost_handlers
@@ -27,6 +27,8 @@ from bot.keyboards import (
     chat_actions_menu_keyboard,
     chats_export_keyboard,
     chats_recent_keyboard,
+    delword_pick_chat_keyboard,
+    delword_scope_keyboard,
     ghost_settings_keyboard,
     help_back_keyboard,
     help_topics_keyboard,
@@ -353,9 +355,11 @@ async def us_search(call: CallbackQuery) -> None:
     _pending[owner_id] = {"kind": "db_search", "created_at": time.time()}
     await call.answer()
     await call.message.answer(
-        "🔍 <b>Поиск по сохранённой базе сообщений</b>\n\n"
-        "Отправьте ключевое слово или фразу одним сообщением.\n"
-        "<i>Ищет среди всех сохранённых сообщений по всем вашим чатам.</i>"
+        "🔍 <b>Умный поиск по базе сообщений</b>\n\n"
+        "Вы можете отправить:\n"
+        "• <b>Текст, фразу или регулярку</b> — бот сам определит регулярное выражение или текст\n"
+        "• <b>ID</b> сообщения или чата (например: <code>#123</code> или <code>id:123</code>)\n"
+        "• <b>Медиафайл</b> (фото, голосовое, кружок, видео, аудио, документ) — бот найдёт все совпадения по полезному контенту (даже если формат или метаданные изменились)!"
     )
 
 
@@ -618,6 +622,18 @@ async def us_online_stop(call: CallbackQuery, storage: Storage) -> None:
     await us_open_online(call, storage)
 
 
+@router.callback_query(F.data == "us:online:custom")
+async def us_online_custom(call: CallbackQuery, storage: Storage) -> None:
+    owner_id = call.from_user.id
+    is_admin = storage.is_admin(owner_id)
+    limit_note = "" if is_admin else " (до 60 минут)"
+    _pending[owner_id] = {"kind": "online_custom_min", "created_at": time.time()}
+    await call.answer()
+    await call.message.answer(
+        f"⏱ <b>Онлайн-режим</b>\n\nВведите желаемое время в минутах{limit_note}:"
+    )
+
+
 # ----------------------------------------------------------- secret chat actions
 @router.callback_query(F.data == "us:open:actions")
 async def us_open_actions(call: CallbackQuery, storage: Storage) -> None:
@@ -702,8 +718,82 @@ async def act_execute(call: CallbackQuery, storage: Storage) -> None:
     if action == "delword":
         _pending[owner_id] = {"kind": "act_delword_prompt", "chat_id": chat_id, "conn_id": conn_id, "created_at": time.time()}
         await call.answer()
-        await call.message.answer("Введите слово или регулярное выражение (/регулярка/) для удаления сообщений:")
+        await call.message.answer("Введите слово, фразу или регулярку для удаления в этом чате:")
         return
+    if action == "delregex":
+        _pending[owner_id] = {"kind": "act_delregex_prompt", "chat_id": chat_id, "conn_id": conn_id, "created_at": time.time()}
+        await call.answer()
+        await call.message.answer("Введите регулярное выражение для удаления в этом чате:")
+        return
+
+
+@router.callback_query(F.data == "us:open:delword")
+async def us_open_delword(call: CallbackQuery, storage: Storage) -> None:
+    owner_id = call.from_user.id
+    conns = storage.connections_for_owner(owner_id)
+    if not conns:
+        await call.answer("Нет подключённого Telegram Business", show_alert=True)
+        return
+    text = (
+        "🗑 <b>Очистка по слову, фразе или регулярке</b>\n\n"
+        "Где вы хотите выполнить поиск и удаление сообщений?\n\n"
+        "• <b>🎯 Только в одном чате</b> — выбор конкретного чата из списка\n"
+        "• <b>🌐 Во ВСЕХ чатах сразу</b> — массовая зачистка по всем перепискам"
+    )
+    await call.message.edit_text(text, reply_markup=delword_scope_keyboard())
+    await call.answer()
+
+
+@router.callback_query(F.data == "delword:scope:single")
+async def delword_scope_single(call: CallbackQuery, storage: Storage) -> None:
+    owner_id = call.from_user.id
+    chats = storage.recent_chats(owner_id)
+    chat_list = [{"chat_id": cid, "title": st.title} for cid, st in chats]
+    text = "🎯 <b>Выберите чат для очистки</b> или введите Chat ID вручную:"
+    await call.message.edit_text(text, reply_markup=delword_pick_chat_keyboard(chat_list))
+    await call.answer()
+
+
+@router.callback_query(F.data == "delword:pick:manual")
+async def delword_pick_manual(call: CallbackQuery, storage: Storage) -> None:
+    owner_id = call.from_user.id
+    _pending[owner_id] = {"kind": "del_manual_chat", "created_at": time.time()}
+    await call.answer()
+    await call.message.answer("Введите числовой Chat ID целевого собеседника:")
+
+
+@router.callback_query(F.data.startswith("delword:pick:"))
+async def delword_pick_chat(call: CallbackQuery, storage: Storage) -> None:
+    owner_id = call.from_user.id
+    chat_id = int(call.data.split(":", 2)[2])
+    conns = storage.connections_for_owner(owner_id)
+    conn_id = conns[0].connection_id if conns else ""
+    _pending[owner_id] = {
+        "kind": "act_delword_prompt",
+        "chat_id": chat_id,
+        "conn_id": conn_id,
+        "created_at": time.time(),
+    }
+    await call.answer()
+    await call.message.answer(
+        f"🎯 <b>Очистка чата <code>{chat_id}</code></b>\n\n"
+        "Введите слово, фразу или регулярку для поиска и удаления:"
+    )
+
+
+@router.callback_query(F.data == "delword:scope:all")
+async def delword_scope_all(call: CallbackQuery, storage: Storage) -> None:
+    owner_id = call.from_user.id
+    _pending[owner_id] = {
+        "kind": "del_all_chats_prompt",
+        "created_at": time.time(),
+    }
+    await call.answer()
+    await call.message.answer(
+        "🌐 <b>Массовое удаление во ВСЕХ чатах</b>\n\n"
+        "⚠️ Сообщения будут найдены и удалены <b>во всех ваших диалогах</b>!\n\n"
+        "Введите слово, фразу или регулярное выражение:"
+    )
 
 
 # -------------------------------------------------------------------------- /admin
@@ -1047,11 +1137,61 @@ async def private_input(message: Message, storage: Storage) -> None:
     kind = state["kind"]
 
     if kind == "db_search":
+        media = extract_media(message)
+        _pending.pop(user_id, None)
+
+        if media is not None:
+            status_msg = await message.answer("🔍 <i>Анализирую медиа и вычисляю хэш контента...</i>")
+            try:
+                data = await download_bytes(message.bot, media.file_id)
+                content_hash = compute_media_hash(data, media.kind) if data else None
+                rows = storage.db.search_messages_by_media(
+                    user_id,
+                    file_unique_id=media.file_unique_id,
+                    content_hash=content_hash,
+                    kind=media.kind,
+                )
+                media_label = {
+                    "photo": "🖼 Фото",
+                    "voice": "🎤 Голосовое сообщение",
+                    "video_note": "📹 Видеосообщение (кружок)",
+                    "video": "🎬 Видео",
+                    "audio": "🎵 Аудио",
+                    "document": "📄 Документ/файл",
+                    "sticker": "🎭 Стикер",
+                    "animation": "🎞 GIF/Анимация",
+                }.get(media.kind, "📁 Медиафайл")
+
+                if not rows:
+                    await status_msg.edit_text(
+                        f"🔍 <b>Поиск по медиа ({media_label}):</b>\n\nНичего не найдено в базе сохранённых сообщений."
+                    )
+                    return
+
+                lines = [f"🔍 <b>Найдено совпадений по медиа ({media_label}) — {len(rows)}:</b>\n"]
+                for r in rows:
+                    ts = time.strftime("%d.%m %H:%M", time.localtime(r["cached_at"]))
+                    sender = html.escape(r["from_user_name"] or "?")
+                    chat_t = html.escape(r["chat_title"] or str(r["chat_id"]))
+                    content = html.escape(r["content"] or "")
+                    suffix = " 🗑 (удалено)" if r["deleted_at"] else (" ✏️ (изменено)" if r["edited_at"] else "")
+                    lines.append(f"💬 <b>{chat_t}</b> | <b>{sender}</b> <i>{ts}</i>{suffix}\n{content}\n")
+
+                text = "\n".join(lines)
+                if len(text) > 4000:
+                    text = text[:3900] + "\n\n<i>…показаны первые результаты</i>"
+                await status_msg.edit_text(text)
+                return
+            except Exception as exc:
+                logger.exception("Ошибка при поиске по медиа")
+                await status_msg.edit_text(f"❌ Ошибка поиска по медиа: {exc}")
+                return
+
         query = (message.text or "").strip()
         if not query:
-            await message.answer("❌ Введите текст для поиска. Попробуйте ещё раз:")
+            await message.answer("❌ Введите текст или отправьте медиафайл. Попробуйте ещё раз:")
             return
-        _pending.pop(user_id, None)
+
         rows = storage.db.search_messages(user_id, query)
         if not rows:
             await message.answer(f"🔍 <b>Поиск по «{html.escape(query)}»:</b>\n\nНичего не найдено.")
@@ -1063,7 +1203,7 @@ async def private_input(message: Message, storage: Storage) -> None:
             sender = html.escape(r["from_user_name"] or "?")
             chat_t = html.escape(r["chat_title"] or str(r["chat_id"]))
             content = html.escape(r["content"] or "")
-            suffix = " 🗑" if r["deleted_at"] else (" ✏️" if r["edited_at"] else "")
+            suffix = " 🗑 (удалено)" if r["deleted_at"] else (" ✏️ (изменено)" if r["edited_at"] else "")
             lines.append(f"💬 <b>{chat_t}</b> | <b>{sender}</b> <i>{ts}</i>{suffix}\n{content}\n")
 
         text = "\n".join(lines)
@@ -1282,25 +1422,82 @@ async def private_input(message: Message, storage: Storage) -> None:
         await message.answer(f"🗑 Удалено <b>{total_del}</b> сообщений в чате <code>{chat_id}</code>.")
         return
 
-    if kind == "act_delword_prompt":
+    if kind == "online_custom_min":
+        _pending.pop(user_id, None)
+        raw = (message.text or "").strip()
+        if not raw.isdigit():
+            await message.answer("❌ Введите целое число минут (например: 25).")
+            return
+        minutes = int(raw)
+        if minutes <= 0:
+            await message.answer("❌ Время должно быть больше 0 минут.")
+            return
+        is_admin = storage.is_admin(user_id)
+        if not is_admin and minutes > 60:
+            minutes = 60
+            await message.answer("⚠️ Максимальное время онлайн-режима — 60 минут (1 час). Установлено на 60 минут.")
+        duration_sec = minutes * 60
+        task = asyncio.create_task(_online_worker(message.bot, storage, user_id, duration_sec))
+        storage.start_online(user_id, duration_sec, task)
+        await message.answer(f"🟢 Онлайн-режим успешно запущен на <b>{minutes}</b> мин.!")
+        return
+
+    if kind == "del_manual_chat":
+        _pending.pop(user_id, None)
+        raw = (message.text or "").strip()
+        if not raw.lstrip("-").isdigit():
+            await message.answer("❌ Введите корректный числовой Chat ID.")
+            return
+        target_chat = int(raw)
+        conns = storage.connections_for_owner(user_id)
+        conn_id = conns[0].connection_id if conns else ""
+        _pending[user_id] = {
+            "kind": "act_delword_prompt",
+            "chat_id": target_chat,
+            "conn_id": conn_id,
+            "created_at": time.time(),
+        }
+        await message.answer(
+            f"🎯 <b>Очистка чата <code>{target_chat}</code></b>\n\n"
+            "Введите слово, фразу или регулярку для удаления:"
+        )
+        return
+
+    if kind in ("act_delword_prompt", "act_delregex_prompt"):
         chat_id = state["chat_id"]
         conn_id = state["conn_id"]
         _pending.pop(user_id, None)
-        pattern = (message.text or "").strip()
-        if not pattern:
+        raw_pattern = (message.text or "").strip()
+        if not raw_pattern:
             await message.answer("❌ Шаблон пуст.")
             return
-        is_regex = pattern.startswith("/") and pattern.endswith("/") and len(pattern) > 2
+
+        is_explicit = raw_pattern.startswith(("re:", "regex:")) or (
+            raw_pattern.startswith("/") and raw_pattern.endswith("/") and len(raw_pattern) > 2
+        )
+        pattern = raw_pattern
+        if raw_pattern.startswith(("re:", "regex:")):
+            pattern = raw_pattern.split(":", 1)[1].strip()
+        elif raw_pattern.startswith("/") and raw_pattern.endswith("/") and len(raw_pattern) > 2:
+            pattern = raw_pattern[1:-1]
+
+        regex_chars = r".*+?[]{}()^$|\\"
+        is_regex = is_explicit or any(c in pattern for c in regex_chars) or (kind == "act_delregex_prompt")
+
+        matched_ids = []
         if is_regex:
-            pattern = pattern[1:-1]
-        try:
-            matched_ids = storage.db.find_messages_matching(conn_id, chat_id, pattern, is_regex=is_regex)
-        except Exception as exc:
-            await message.answer(f"❌ Ошибка в регулярке: {exc}")
-            return
+            try:
+                import re
+                re.compile(pattern)
+                matched_ids = storage.db.find_messages_matching(conn_id, chat_id, pattern, is_regex=True)
+            except Exception:
+                is_regex = False
+        if not is_regex or (not matched_ids and not is_explicit and kind != "act_delregex_prompt"):
+            matched_ids = storage.db.find_messages_matching(conn_id, chat_id, raw_pattern, is_regex=False)
+
         total_del = 0
         for i in range(0, len(matched_ids), 100):
-            chunk = matched_ids[i:i + 100]
+            chunk = matched_ids[i : i + 100]
             for mid in chunk:
                 storage.mark_bot_deleted(conn_id, chat_id, mid)
             try:
@@ -1308,7 +1505,61 @@ async def private_input(message: Message, storage: Storage) -> None:
                 total_del += len(chunk)
             except Exception:
                 pass
-        await message.answer(f"🗑 Удалено <b>{total_del}</b> сообщений в чате <code>{chat_id}</code> по фильтру «{html.escape(pattern)}».")
+        await message.answer(
+            f"🗑 Удалено <b>{total_del}</b> сообщений в чате <code>{chat_id}</code> по фильтру «{html.escape(raw_pattern)}»."
+        )
+        return
+
+    if kind == "del_all_chats_prompt":
+        _pending.pop(user_id, None)
+        raw_pattern = (message.text or "").strip()
+        if not raw_pattern:
+            await message.answer("❌ Шаблон пуст.")
+            return
+
+        is_explicit = raw_pattern.startswith(("re:", "regex:")) or (
+            raw_pattern.startswith("/") and raw_pattern.endswith("/") and len(raw_pattern) > 2
+        )
+        pattern = raw_pattern
+        if raw_pattern.startswith(("re:", "regex:")):
+            pattern = raw_pattern.split(":", 1)[1].strip()
+        elif raw_pattern.startswith("/") and raw_pattern.endswith("/") and len(raw_pattern) > 2:
+            pattern = raw_pattern[1:-1]
+
+        regex_chars = r".*+?[]{}()^$|\\"
+        is_regex = is_explicit or any(c in pattern for c in regex_chars)
+
+        all_rows = []
+        if is_regex:
+            try:
+                import re
+                re.compile(pattern)
+                all_rows = storage.db.find_messages_matching_all(user_id, pattern, is_regex=True)
+            except Exception:
+                is_regex = False
+        if not is_regex or (not all_rows and not is_explicit):
+            all_rows = storage.db.find_messages_matching_all(user_id, raw_pattern, is_regex=False)
+
+        by_chat: dict[tuple[str, int], list[int]] = {}
+        for r in all_rows:
+            by_chat.setdefault((r["connection_id"], int(r["chat_id"])), []).append(int(r["message_id"]))
+
+        total_del = 0
+        for (conn_id, cid), mids in by_chat.items():
+            for i in range(0, len(mids), 100):
+                chunk = mids[i : i + 100]
+                for mid in chunk:
+                    storage.mark_bot_deleted(conn_id, cid, mid)
+                try:
+                    await message.bot.delete_business_messages(business_connection_id=conn_id, message_ids=chunk)
+                    total_del += len(chunk)
+                except Exception:
+                    pass
+
+        await message.answer(
+            f"🌐 <b>Массовая зачистка завершена</b>\n\n"
+            f"Удалено <b>{total_del}</b> сообщений в <b>{len(by_chat)}</b> чатах по запросу «{html.escape(raw_pattern)}»."
+        )
         return
 
     if kind == "act_spam_prompt":

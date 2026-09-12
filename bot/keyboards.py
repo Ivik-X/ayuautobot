@@ -63,6 +63,7 @@ def menu_keyboard() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(text="📤 Экспорт истории", callback_data="us:export"),
+            InlineKeyboardButton(text="🗑 Очистка по слову/рег.", callback_data="us:open:delword"),
         ],
         [InlineKeyboardButton(text="✖️ Закрыть", callback_data="us:close")],
     ]
@@ -303,6 +304,9 @@ def online_menu_keyboard(is_active: bool, remaining_sec: int | None, is_admin: b
             InlineKeyboardButton(text="⏱ 30 мин", callback_data="us:online:start:1800"),
             InlineKeyboardButton(text="⏱ 1 час", callback_data="us:online:start:3600"),
         ])
+        rows.append([
+            InlineKeyboardButton(text="✏️ Указать в минутах", callback_data="us:online:custom"),
+        ])
         if is_admin:
             rows.append([
                 InlineKeyboardButton(text="⏱ 3 часа ⭐", callback_data="us:online:start:10800"),
@@ -319,6 +323,9 @@ def chat_actions_menu_keyboard(chats: list[dict]) -> InlineKeyboardMarkup:
         cid = c["chat_id"]
         title = c["title"]
         rows.append([InlineKeyboardButton(text=f"💬 {title}", callback_data=f"act:chat:{cid}")])
+    rows.append([
+        InlineKeyboardButton(text="🗑 Очистка по слову / регулярке", callback_data="us:open:delword"),
+    ])
     rows.append([InlineKeyboardButton(text="➕ Ввести Chat ID вручную", callback_data="act:manual")])
     rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="us:back")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -342,8 +349,36 @@ def chat_action_picker_keyboard(chat_id: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="💣 Спам в чат", callback_data=f"act:do:spam:{chat_id}"),
             InlineKeyboardButton(text="🔍 Удалить по слову", callback_data=f"act:do:delword:{chat_id}"),
         ],
+        [
+            InlineKeyboardButton(text="🧩 Удалить по регулярке", callback_data=f"act:do:delregex:{chat_id}"),
+        ],
         [InlineKeyboardButton(text="⬅️ К выбору чата", callback_data="us:open:actions")],
     ])
+
+
+def delword_scope_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🎯 Только в одном чате", callback_data="delword:scope:single"),
+            ],
+            [
+                InlineKeyboardButton(text="🌐 Во ВСЕХ чатах сразу", callback_data="delword:scope:all"),
+            ],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="us:back")],
+        ]
+    )
+
+
+def delword_pick_chat_keyboard(chats: list[dict]) -> InlineKeyboardMarkup:
+    rows = []
+    for c in chats[:10]:
+        cid = c["chat_id"]
+        title = c["title"]
+        rows.append([InlineKeyboardButton(text=f"💬 {title}", callback_data=f"delword:pick:{cid}")])
+    rows.append([InlineKeyboardButton(text="➕ Ввести Chat ID вручную", callback_data="delword:pick:manual")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="us:open:delword")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def admin_section_keyboard(section: str, settings: GlobalSettings) -> InlineKeyboardMarkup:

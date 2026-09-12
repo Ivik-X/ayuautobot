@@ -9,6 +9,9 @@ from pathlib import Path
 from aiogram import Bot
 from aiogram.types import FSInputFile, Message
 
+import hashlib
+import io
+
 logger = logging.getLogger(__name__)
 
 MEDIA_DIR = Path(__file__).resolve().parent.parent / "data" / "media"
@@ -24,31 +27,167 @@ class MediaRef:
     file_name: str | None = None
     is_animated: bool = False
     is_video: bool = False
+    file_unique_id: str | None = None
+    content_hash: str | None = None
+
+
+def _compute_image_hash(data: bytes) -> str | None:
+    try:
+        from PIL import Image
+        with Image.open(io.BytesIO(data)) as img:
+            # 1. dHash (Difference Hash) - 64 bits (16 hex chars)
+            # Приводим к оттенкам серого 9x8 — метаданные EXIF и сжатие не влияют на визуальный хэш
+            gray = img.convert("L").resize((9, 8), Image.Resampling.LANCZOS)
+            pixels = list(gray.tobytes())
+            bits = "".join(
+                "1" if pixels[r * 9 + c] > pixels[r * 9 + c + 1] else "0"
+                for r in range(8)
+                for c in range(8)
+            )
+            dhash_hex = f"{int(bits, 2):016x}"
+
+            # 2. Raw pixel hash — хэш полезных пикселей без EXIF/контейнера
+            rgb = img.convert("RGB")
+            if rgb.width > 256 or rgb.height > 256:
+                rgb = rgb.resize((128, 128), Image.Resampling.BILINEAR)
+            pixel_hash = hashlib.sha256(rgb.tobytes()).hexdigest()[:16]
+            return f"img:dhash:{dhash_hex}:{pixel_hash}"
+    except Exception:
+        return None
+
+
+def _compute_audio_payload(data: bytes) -> bytes:
+    payload = data
+    # Вырезаем ID3v2 заголовок (если есть в начале)
+    if payload.startswith(b"ID3") and len(payload) >= 10:
+        tag_size = (
+            ((payload[6] & 0x7F) << 21)
+            | ((payload[7] & 0x7F) << 14)
+            | ((payload[8] & 0x7F) << 7)
+            | (payload[9] & 0x7F)
+        )
+        payload = payload[10 + tag_size :]
+    # Вырезаем ID3v1 хвост (последние 128 байт)
+    if len(payload) >= 128 and payload[-128:].startswith(b"TAG"):
+        payload = payload[:-128]
+    return payload
+
+
+def _compute_video_payload(data: bytes) -> bytes:
+    # Для MP4/MOV извлекаем полезный mdat атом (содержит медиапоток без метаданных)
+    offset = 0
+    n = len(data)
+    while offset + 8 <= n:
+        size = int.from_bytes(data[offset : offset + 4], "big")
+        atom_type = data[offset + 4 : offset + 8]
+        if size == 1:
+            if offset + 16 > n:
+                break
+            size = int.from_bytes(data[offset + 8 : offset + 16], "big")
+            if atom_type == b"mdat":
+                return data[offset + 16 : offset + size]
+            if size == 0:
+                break
+            offset += size
+        elif size == 0:
+            if atom_type == b"mdat":
+                return data[offset + 8 :]
+            break
+        else:
+            if atom_type == b"mdat":
+                return data[offset + 8 : offset + size]
+            offset += size
+    return data
+
+
+def compute_media_hash(target: Path | bytes | io.BytesIO, kind: str) -> str:
+    """Вычисляет умный хэш полезных данных медиафайла (без метаданных/EXIF)."""
+    if isinstance(target, Path):
+        try:
+            with open(target, "rb") as f:
+                data = f.read()
+        except Exception:
+            return ""
+    elif isinstance(target, io.BytesIO):
+        data = target.getvalue()
+    elif isinstance(target, bytes):
+        data = target
+    else:
+        return ""
+
+    if not data:
+        return ""
+
+    if kind in ("photo", "sticker", "animation"):
+        h = _compute_image_hash(data)
+        if h:
+            return h
+
+    if kind in ("voice", "audio"):
+        payload = _compute_audio_payload(data)
+        return f"aud:{hashlib.sha256(payload).hexdigest()[:32]}"
+
+    if kind in ("video", "video_note"):
+        payload = _compute_video_payload(data)
+        return f"vid:{hashlib.sha256(payload).hexdigest()[:32]}"
+
+    if kind == "document":
+        h = _compute_image_hash(data)
+        if h:
+            return h
+        return f"doc:{hashlib.sha256(data).hexdigest()[:32]}"
+
+    return f"file:{hashlib.sha256(data).hexdigest()[:32]}"
+
+
+def hamming_distance(h1: str, h2: str) -> int:
+    """Вычисляет расстояние Хэмминга между 16-значными hex-хэшами dHash."""
+    try:
+        return (int(h1, 16) ^ int(h2, 16)).bit_count()
+    except Exception:
+        return 999
 
 
 def extract_media(message: Message) -> MediaRef | None:
     if message.photo:
         photo = message.photo[-1]
-        return MediaRef(kind="photo", file_id=photo.file_id, mime_type="image/jpeg")
+        return MediaRef(
+            kind="photo",
+            file_id=photo.file_id,
+            file_unique_id=photo.file_unique_id,
+            mime_type="image/jpeg",
+        )
 
     if message.video:
         return MediaRef(
             kind="video",
             file_id=message.video.file_id,
+            file_unique_id=message.video.file_unique_id,
             mime_type=message.video.mime_type,
             file_name=message.video.file_name,
         )
 
     if message.video_note:
-        return MediaRef(kind="video_note", file_id=message.video_note.file_id, mime_type="video/mp4")
+        return MediaRef(
+            kind="video_note",
+            file_id=message.video_note.file_id,
+            file_unique_id=message.video_note.file_unique_id,
+            mime_type="video/mp4",
+        )
 
     if message.voice:
-        return MediaRef(kind="voice", file_id=message.voice.file_id, mime_type=message.voice.mime_type)
+        return MediaRef(
+            kind="voice",
+            file_id=message.voice.file_id,
+            file_unique_id=message.voice.file_unique_id,
+            mime_type=message.voice.mime_type,
+        )
 
     if message.audio:
         return MediaRef(
             kind="audio",
             file_id=message.audio.file_id,
+            file_unique_id=message.audio.file_unique_id,
             mime_type=message.audio.mime_type,
             file_name=message.audio.file_name or message.audio.title,
         )
@@ -57,6 +196,7 @@ def extract_media(message: Message) -> MediaRef | None:
         return MediaRef(
             kind="document",
             file_id=message.document.file_id,
+            file_unique_id=message.document.file_unique_id,
             mime_type=message.document.mime_type,
             file_name=message.document.file_name,
         )
@@ -65,6 +205,7 @@ def extract_media(message: Message) -> MediaRef | None:
         return MediaRef(
             kind="animation",
             file_id=message.animation.file_id,
+            file_unique_id=message.animation.file_unique_id,
             mime_type=message.animation.mime_type,
             file_name=message.animation.file_name,
         )
@@ -73,6 +214,7 @@ def extract_media(message: Message) -> MediaRef | None:
         return MediaRef(
             kind="sticker",
             file_id=message.sticker.file_id,
+            file_unique_id=message.sticker.file_unique_id,
             mime_type="image/webp",
             file_name=message.sticker.emoji,
             is_animated=message.sticker.is_animated,
@@ -94,7 +236,6 @@ def media_flags(message: Message) -> list[str]:
 
 
 def _owner_dir(base: Path, connection_id: str) -> Path:
-    # разложено по connection_id, чтобы не смешивать медиа разных владельцев
     safe = "".join(c for c in connection_id if c.isalnum())[:40] or "common"
     return base / safe
 
@@ -119,12 +260,10 @@ async def download_media(
         try:
             tg_file = await bot.get_file(media.file_id)
             if not tg_file.file_path:
-                # Telegram не отдаёт одноразовые/защищённые медиа
                 raise RuntimeError(
                     f"get_file вернул пустой file_path для {media.kind} (message_id={message_id})"
                 )
 
-            # Проверяем размер ДО скачивания — экономим трафик и место
             file_size = tg_file.file_size or 0
             max_bytes = max_file_mb * 1024 * 1024
             if file_size > max_bytes:
@@ -132,10 +271,14 @@ async def download_media(
                     "Пропущено скачивание %s (message_id=%s): размер %.1f МБ > лимита %d МБ — сохранён только file_id",
                     media.kind, message_id, file_size / (1024 * 1024), max_file_mb,
                 )
-                return media  # local_path остаётся None
+                return media
 
             await bot.download_file(tg_file.file_path, destination=destination)
             media.local_path = destination
+            try:
+                media.content_hash = compute_media_hash(destination, media.kind)
+            except Exception:
+                pass
             return media
         except Exception as exc:
             if attempt == 0:

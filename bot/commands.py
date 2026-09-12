@@ -81,11 +81,13 @@ class DelCommand:
 @dataclass(frozen=True, slots=True)
 class DelWordCommand:
     word: str
+    all_chats: bool = False
 
 
 @dataclass(frozen=True, slots=True)
 class DelRegexCommand:
     pattern: str
+    all_chats: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,8 +142,8 @@ Command = (
 _SPAM_RE = re.compile(r"^\.spam\s+(\d+)(?:\s+(.+))?$", re.DOTALL | re.IGNORECASE)
 _TROLL_RE = re.compile(r"^\.troll(?:\s+(\d+))?$", re.IGNORECASE)
 _DEL_RE = re.compile(r"^\.del\s+(\d+)$", re.IGNORECASE)
-_DELWORD_RE = re.compile(r"^\.delword\s+(.+)$", re.DOTALL | re.IGNORECASE)
-_DELREGEX_RE = re.compile(r"^\.delregex\s+(.+)$", re.DOTALL | re.IGNORECASE)
+_DELWORD_RE = re.compile(r"^\.delword(?:\s+(-all|--all|all))?\s+(.+)$", re.DOTALL | re.IGNORECASE)
+_DELREGEX_RE = re.compile(r"^\.delregex(?:\s+(-all|--all|all))?\s+(.+)$", re.DOTALL | re.IGNORECASE)
 _CLONE_RE = re.compile(r"^\.clone\s+(\S+)$", re.IGNORECASE)
 _TONOTE_RE = re.compile(r"^\.tonote$", re.IGNORECASE)
 _TOVOICE_RE = re.compile(r"^\.tovoice$", re.IGNORECASE)
@@ -199,10 +201,12 @@ def parse_command(text: str | None) -> Command | None:
         return DelCommand(count=count)
 
     if match := _DELWORD_RE.match(text):
-        return DelWordCommand(word=match.group(1).strip())
+        scope_all = bool(match.group(1))
+        return DelWordCommand(word=match.group(2).strip(), all_chats=scope_all)
 
     if match := _DELREGEX_RE.match(text):
-        return DelRegexCommand(pattern=match.group(1).strip())
+        scope_all = bool(match.group(1))
+        return DelRegexCommand(pattern=match.group(2).strip(), all_chats=scope_all)
 
     if match := _CLONE_RE.match(text):
         return CloneCommand(target=match.group(1).strip())

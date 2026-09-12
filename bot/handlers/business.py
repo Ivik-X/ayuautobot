@@ -613,6 +613,28 @@ async def _dispatch(
 
     if isinstance(command, DelWordCommand):
         pattern = command.word.strip()
+        if command.all_chats and owner_id:
+            all_rows = storage.db.find_messages_matching_all(owner_id, pattern, is_regex=False)
+            by_chat: dict[tuple[str, int], list[int]] = {}
+            for r in all_rows:
+                by_chat.setdefault((r["connection_id"], int(r["chat_id"])), []).append(int(r["message_id"]))
+            total_del = 0
+            for (conn_id, cid), mids in by_chat.items():
+                for i in range(0, len(mids), 100):
+                    chunk = mids[i : i + 100]
+                    for mid in chunk:
+                        storage.mark_bot_deleted(conn_id, cid, mid)
+                    try:
+                        await bot.delete_business_messages(business_connection_id=conn_id, message_ids=chunk)
+                        total_del += len(chunk)
+                    except Exception:
+                        logger.exception("Ошибка удаления сообщений по слову (all)")
+            await _notify_owner(
+                bot, storage, connection_id,
+                f"🗑 Найдено и удалено <b>{total_del}</b> сообщений в <b>{len(by_chat)}</b> чатах, содержащих «{html.escape(pattern)}»."
+            )
+            return
+
         matched_ids = storage.db.find_messages_matching(connection_id, chat_id, pattern, is_regex=False)
         total_del = 0
         for i in range(0, len(matched_ids), 100):
@@ -632,6 +654,32 @@ async def _dispatch(
 
     if isinstance(command, DelRegexCommand):
         pattern = command.pattern.strip()
+        if command.all_chats and owner_id:
+            try:
+                all_rows = storage.db.find_messages_matching_all(owner_id, pattern, is_regex=True)
+            except Exception as exc:
+                await _notify_owner(bot, storage, connection_id, f"❌ Ошибка в регулярном выражении: {exc}")
+                return
+            by_chat: dict[tuple[str, int], list[int]] = {}
+            for r in all_rows:
+                by_chat.setdefault((r["connection_id"], int(r["chat_id"])), []).append(int(r["message_id"]))
+            total_del = 0
+            for (conn_id, cid), mids in by_chat.items():
+                for i in range(0, len(mids), 100):
+                    chunk = mids[i : i + 100]
+                    for mid in chunk:
+                        storage.mark_bot_deleted(conn_id, cid, mid)
+                    try:
+                        await bot.delete_business_messages(business_connection_id=conn_id, message_ids=chunk)
+                        total_del += len(chunk)
+                    except Exception:
+                        logger.exception("Ошибка удаления сообщений по регулярке (all)")
+            await _notify_owner(
+                bot, storage, connection_id,
+                f"🗑 Найдено и удалено <b>{total_del}</b> сообщений в <b>{len(by_chat)}</b> чатах по регулярке <code>{html.escape(pattern)}</code>."
+            )
+            return
+
         try:
             matched_ids = storage.db.find_messages_matching(connection_id, chat_id, pattern, is_regex=True)
         except Exception as exc:

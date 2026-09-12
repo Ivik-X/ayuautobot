@@ -84,6 +84,9 @@ class Database:
                 flags         TEXT,
                 media_kind    TEXT,
                 media_file_id TEXT,
+                media_file_unique_id TEXT,
+                media_content_hash TEXT,
+                media_file_name TEXT,
                 media_path    TEXT,
                 cached_at     REAL NOT NULL,
                 edited_at     REAL,
@@ -233,6 +236,20 @@ class Database:
             logger.info("Миграция БД: добавляю колонку messages.edit_history")
             self._conn.execute("ALTER TABLE messages ADD COLUMN edit_history TEXT NOT NULL DEFAULT '[]'")
             self._conn.commit()
+        if "media_file_unique_id" not in columns:
+            logger.info("Миграция БД: добавляю колонку messages.media_file_unique_id")
+            self._conn.execute("ALTER TABLE messages ADD COLUMN media_file_unique_id TEXT")
+            self._conn.commit()
+        if "media_content_hash" not in columns:
+            logger.info("Миграция БД: добавляю колонку messages.media_content_hash")
+            self._conn.execute("ALTER TABLE messages ADD COLUMN media_content_hash TEXT")
+            self._conn.commit()
+        if "media_file_name" not in columns:
+            logger.info("Миграция БД: добавляю колонку messages.media_file_name")
+            self._conn.execute("ALTER TABLE messages ADD COLUMN media_file_name TEXT")
+            self._conn.commit()
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_file_unique ON messages(media_file_unique_id)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_content_hash ON messages(media_content_hash)")
         # Колонка bio в таблице watched_profiles
         watched_cols = {row["name"] for row in self._conn.execute("PRAGMA table_info(watched_profiles)").fetchall()}
         if "bio" not in watched_cols:
@@ -543,6 +560,9 @@ class Database:
         flags_json = json.dumps(cached.flags, ensure_ascii=False) if cached.flags else None
         media_kind = cached.media.kind if cached.media else None
         media_file_id = cached.media.file_id if cached.media else None
+        media_file_unique_id = cached.media.file_unique_id if cached.media else None
+        media_content_hash = cached.media.content_hash if cached.media else None
+        media_file_name = cached.media.file_name if cached.media else None
         media_path = str(cached.media.local_path) if cached.media and cached.media.local_path else None
 
         edit_history_json = '[]'
@@ -565,8 +585,9 @@ class Database:
             INSERT INTO messages (
                 connection_id, chat_id, message_id, owner_id, chat_title,
                 from_user_id, from_user_name, content, kind, flags,
-                media_kind, media_file_id, media_path, cached_at, edited_at, deleted_at, bot_caused, edit_history
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)
+                media_kind, media_file_id, media_file_unique_id, media_content_hash, media_file_name, media_path,
+                cached_at, edited_at, deleted_at, bot_caused, edit_history
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)
             ON CONFLICT(connection_id, chat_id, message_id) DO UPDATE SET
                 from_user_name=excluded.from_user_name,
                 content=excluded.content,
@@ -574,6 +595,9 @@ class Database:
                 flags=excluded.flags,
                 media_kind=excluded.media_kind,
                 media_file_id=excluded.media_file_id,
+                media_file_unique_id=COALESCE(excluded.media_file_unique_id, messages.media_file_unique_id),
+                media_content_hash=COALESCE(excluded.media_content_hash, messages.media_content_hash),
+                media_file_name=COALESCE(excluded.media_file_name, messages.media_file_name),
                 media_path=excluded.media_path,
                 edited_at=?,
                 edit_history=?
@@ -581,7 +605,8 @@ class Database:
             (
                 cached.connection_id, cached.chat_id, cached.message_id, owner_id, chat_title,
                 cached.from_user_id, cached.from_user_name, cached.content, cached.kind, flags_json,
-                media_kind, media_file_id, media_path, cached.cached_at, int(bot_caused), edit_history_json,
+                media_kind, media_file_id, media_file_unique_id, media_content_hash, media_file_name, media_path,
+                cached.cached_at, int(bot_caused), edit_history_json,
                 time.time(), edit_history_json,
             ),
         )
@@ -809,36 +834,48 @@ class Database:
                 (owner_id, id_query, id_query, id_query, limit),
             ).fetchall()
 
-        # 2. Регулярные выражения (re:... или /.../)
-        is_regex = False
+        # 2. Умное определение: регулярное выражение или обычный поиск
+        is_explicit_regex = False
         regex_pat = query_str
         if query_str.startswith("re:") or query_str.startswith("regex:"):
-            is_regex = True
+            is_explicit_regex = True
             regex_pat = query_str.split(":", 1)[1].strip()
         elif query_str.startswith("/") and query_str.endswith("/") and len(query_str) > 2:
-            is_regex = True
+            is_explicit_regex = True
             regex_pat = query_str[1:-1]
 
-        if is_regex:
-            return self._conn.execute(
-                """
-                SELECT connection_id, chat_id, chat_title, message_id, from_user_name, content, cached_at, media_kind, deleted_at, edited_at
-                FROM messages
-                WHERE owner_id = ? AND (
-                    content REGEXP ? OR
-                    media_file_name REGEXP ? OR
-                    media_kind REGEXP ? OR
-                    media_file_id REGEXP ?
-                )
-                ORDER BY cached_at DESC
-                LIMIT ?
-                """,
-                (owner_id, regex_pat, regex_pat, regex_pat, regex_pat, limit),
-            ).fetchall()
+        regex_chars = r".*+?[]{}()^$|\\"
+        looks_like_regex = is_explicit_regex or any(c in query_str for c in regex_chars)
 
-        # 3. Текстовый поиск + поиск по имени медиафайла, типу, file_id, отправителю
+        regex_rows = []
+        if looks_like_regex:
+            try:
+                import re
+                re.compile(regex_pat)
+                regex_rows = self._conn.execute(
+                    """
+                    SELECT connection_id, chat_id, chat_title, message_id, from_user_name, content, cached_at, media_kind, deleted_at, edited_at
+                    FROM messages
+                    WHERE owner_id = ? AND (
+                        content REGEXP ? OR
+                        media_file_name REGEXP ? OR
+                        media_kind REGEXP ? OR
+                        media_file_id REGEXP ?
+                    )
+                    ORDER BY cached_at DESC
+                    LIMIT ?
+                    """,
+                    (owner_id, regex_pat, regex_pat, regex_pat, regex_pat, limit),
+                ).fetchall()
+            except Exception:
+                regex_rows = []
+
+        if is_explicit_regex:
+            return regex_rows
+
+        # Обычный текстовый поиск
         pattern = f"%{query_str}%"
-        return self._conn.execute(
+        like_rows = self._conn.execute(
             """
             SELECT connection_id, chat_id, chat_title, message_id, from_user_name, content, cached_at, media_kind, deleted_at, edited_at
             FROM messages
@@ -856,10 +893,108 @@ class Database:
             (owner_id, pattern, pattern, pattern, pattern, pattern, pattern, limit),
         ).fetchall()
 
+        if not regex_rows:
+            return like_rows
+        if not like_rows:
+            return regex_rows
+
+        # Если есть результаты и по регулярке, и по обычному тексту — объединяем без дубликатов
+        seen = set()
+        merged = []
+        for r in list(regex_rows) + list(like_rows):
+            k = (r["connection_id"], r["chat_id"], r["message_id"])
+            if k not in seen:
+                seen.add(k)
+                merged.append(r)
+        merged.sort(key=lambda x: x["cached_at"], reverse=True)
+        return merged[:limit]
+
+    def search_messages_by_media(
+        self,
+        owner_id: int,
+        file_unique_id: str | None = None,
+        content_hash: str | None = None,
+        kind: str | None = None,
+        limit: int = 20,
+    ) -> list[sqlite3.Row]:
+        """Умный поиск сообщений по медиафайлу: по file_unique_id, полезному хэшу контента
+        и перцептивному расстоянию Хэмминга (для изображений).
+        """
+        results: list[sqlite3.Row] = []
+        seen = set()
+
+        def add_rows(rows):
+            for r in rows:
+                k = (r["connection_id"], r["chat_id"], r["message_id"])
+                if k not in seen:
+                    seen.add(k)
+                    results.append(r)
+
+        # 1. Поиск по Telegram file_unique_id
+        if file_unique_id:
+            rows = self._conn.execute(
+                """
+                SELECT connection_id, chat_id, chat_title, message_id, from_user_name, content, cached_at, media_kind, deleted_at, edited_at, media_content_hash
+                FROM messages
+                WHERE owner_id = ? AND media_file_unique_id = ?
+                ORDER BY cached_at DESC
+                LIMIT ?
+                """,
+                (owner_id, file_unique_id, limit),
+            ).fetchall()
+            add_rows(rows)
+
+        # 2. Точный поиск по полезному content_hash
+        if content_hash:
+            rows = self._conn.execute(
+                """
+                SELECT connection_id, chat_id, chat_title, message_id, from_user_name, content, cached_at, media_kind, deleted_at, edited_at, media_content_hash
+                FROM messages
+                WHERE owner_id = ? AND media_content_hash = ?
+                ORDER BY cached_at DESC
+                LIMIT ?
+                """,
+                (owner_id, content_hash, limit),
+            ).fetchall()
+            add_rows(rows)
+
+        # 3. Перцептивный поиск для изображений (dHash расстояние Хэмминга <= 6)
+        if content_hash and content_hash.startswith("img:dhash:"):
+            try:
+                from bot.media import hamming_distance
+                parts = content_hash.split(":")
+                if len(parts) >= 3:
+                    target_dhash = parts[2]
+                    cand_rows = self._conn.execute(
+                        """
+                        SELECT connection_id, chat_id, chat_title, message_id, from_user_name, content, cached_at, media_kind, deleted_at, edited_at, media_content_hash
+                        FROM messages
+                        WHERE owner_id = ? AND media_content_hash LIKE 'img:dhash:%'
+                        ORDER BY cached_at DESC
+                        LIMIT 300
+                        """,
+                        (owner_id,),
+                    ).fetchall()
+                    for r in cand_rows:
+                        cand_hash = r["media_content_hash"] or ""
+                        cparts = cand_hash.split(":")
+                        if len(cparts) >= 3:
+                            cand_dhash = cparts[2]
+                            if hamming_distance(target_dhash, cand_dhash) <= 6:
+                                k = (r["connection_id"], r["chat_id"], r["message_id"])
+                                if k not in seen:
+                                    seen.add(k)
+                                    results.append(r)
+            except Exception:
+                logger.exception("Ошибка перцептивного сравнения dHash")
+
+        results.sort(key=lambda x: x["cached_at"], reverse=True)
+        return results[:limit]
+
     def find_messages_matching(
         self, connection_id: str, chat_id: int, pattern: str, *, is_regex: bool = False
     ) -> list[int]:
-        """Возвращает список ID сообщений чата, текст или медиа которых совпадают с шаблоном/регуляркой."""
+        """Возвращает список ID сообщений чата, текст или имя файла которых совпадают с шаблоном/регуляркой."""
         if is_regex:
             rows = self._conn.execute(
                 """
@@ -878,6 +1013,32 @@ class Database:
                 (connection_id, chat_id, like_pat, like_pat),
             ).fetchall()
         return [int(r["message_id"]) for r in rows]
+
+    def find_messages_matching_all(
+        self, owner_id: int, pattern: str, *, is_regex: bool = False
+    ) -> list[sqlite3.Row]:
+        """Возвращает сообщения по ВСЕМ чатам владельца, совпадающие по тексту или регулярке."""
+        if is_regex:
+            return self._conn.execute(
+                """
+                SELECT connection_id, chat_id, message_id, content, chat_title
+                FROM messages
+                WHERE owner_id = ? AND deleted_at IS NULL AND (content REGEXP ? OR media_file_name REGEXP ?)
+                ORDER BY cached_at DESC
+                """,
+                (owner_id, pattern, pattern),
+            ).fetchall()
+        else:
+            like_pat = f"%{pattern}%"
+            return self._conn.execute(
+                """
+                SELECT connection_id, chat_id, message_id, content, chat_title
+                FROM messages
+                WHERE owner_id = ? AND deleted_at IS NULL AND (content LIKE ? OR media_file_name LIKE ?)
+                ORDER BY cached_at DESC
+                """,
+                (owner_id, like_pat, like_pat),
+            ).fetchall()
 
     def purge_older_than(self, hours: float) -> int:
         """Делегирует в purge_messages_older_than."""
@@ -914,10 +1075,17 @@ class Database:
         media = None
         if row["media_kind"] and row["media_file_id"]:
             local_path = Path(row["media_path"]) if row["media_path"] else None
+            keys = row.keys()
+            file_unique_id = row["media_file_unique_id"] if "media_file_unique_id" in keys else None
+            content_hash = row["media_content_hash"] if "media_content_hash" in keys else None
+            file_name = row["media_file_name"] if "media_file_name" in keys else None
             media = MediaRef(
                 kind=row["media_kind"],
                 file_id=row["media_file_id"],
                 local_path=local_path if local_path and local_path.exists() else None,
+                file_unique_id=file_unique_id,
+                content_hash=content_hash,
+                file_name=file_name,
             )
         return CachedMessage(
             connection_id=row["connection_id"],
