@@ -267,6 +267,15 @@ class Storage:
     def chat_stats(self, connection_id: str) -> list[tuple[int, ChatStats]]:
         return self._db.chat_stats(connection_id)
 
+    def recent_chats(self, owner_id: int, limit: int = 30) -> list[dict]:
+        return self._db.recent_chats(owner_id, limit)
+
+    def record_feature_usage(self, feature: str) -> None:
+        self._db.record_feature_usage(feature)
+
+    def get_feature_usage_stats(self) -> list[dict]:
+        return self._db.get_feature_usage_stats()
+
     def db_count(self, connection_id: str | None = None) -> int:
         return self._db.count_messages(connection_id)
 

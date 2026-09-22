@@ -30,14 +30,25 @@ ACCENT = (100, 180, 255)
 
 
 def _try_font(size: int) -> Any:
-    """Возвращает шрифт если доступен, иначе None (Pillow default)."""
+    """Возвращает шрифт с поддержкой кириллицы если доступен, иначе Pillow default."""
     try:
-        from PIL import ImageFont
+        from pathlib import Path
+
+        # Сначала проверяем бандлированный шрифт с поддержкой кириллицы
+        bundled_font = Path(__file__).resolve().parent / "fonts" / "font.ttf"
+        if bundled_font.is_file():
+            try:
+                return ImageFont.truetype(str(bundled_font), size)
+            except Exception:
+                pass
+
         # Пробуем системные шрифты
-        for name in ["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-                     "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-                     "/System/Library/Fonts/Helvetica.ttc",
-                     "/usr/share/fonts/dejavu/DejaVuSans.ttf"]:
+        for name in [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+            "/System/Library/Fonts/Helvetica.ttc",
+            "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+        ]:
             try:
                 return ImageFont.truetype(name, size)
             except Exception:

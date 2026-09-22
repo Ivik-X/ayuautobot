@@ -304,14 +304,26 @@ async def on_deleted_business_messages(event: BusinessMessagesDeleted, bot: Bot,
         if bot_caused and not settings.notify_own_deletions:
             continue
 
-        # Если сообщение не было закэшировано ботом (например, старое сообщение,
-        # удалённое нативным таймером автоудаления Telegram) — не шлём пустые уведомления
+        # Если сообщение не было закэшировано ботом:
+        # если включена опция "Абсолютно все удаленки" — шлём уведомление о факте удаления
         if cached is None:
+            if not settings.notify_own_deletions:
+                continue
+            caption = (
+                f"🗑 <b>Сообщение удалено</b>\n"
+                f"Чат: {chat_link}\n"
+                f"ID: <code>{message_id}</code>\n\n"
+                f"<i>(содержимое не было сохранено в кэше)</i>"
+            )
+            await _dispatch_notification(
+                bot, storage, connection_id, owner_id, settings.notify_delete_mode, "delete",
+                caption=caption, media=None,
+            )
             continue
 
-        # Пропускаем пустые сообщения без медиа (например, служебные таймеры автоудаления)
+        # Пропускаем пустые сообщения без медиа (если не включена опция всех удаленок)
         is_empty_content = not cached.content or cached.content == "[сообщение без текста]"
-        if is_empty_content and not cached.media and not cached.flags:
+        if is_empty_content and not cached.media and not cached.flags and not settings.notify_own_deletions:
             continue
 
         def _safe_html(text: str) -> str:
@@ -400,6 +412,7 @@ async def _maybe_afk_reply(message: Message, bot: Bot, storage: Storage, connect
         return
     if not storage.should_send_afk_reply(connection_id, message.chat.id):
         return
+    storage.record_feature_usage("afk_reply")
     try:
         await bot.send_message(
             chat_id=message.chat.id, text=settings.afk_text, business_connection_id=connection_id
@@ -508,10 +521,13 @@ async def _handle_owner_message(
 
     if command is None:
         if settings.murino_mode and message.text and not message.text.startswith("."):
+            storage.record_feature_usage("murino_mode")
             await _apply_murino(message, bot, storage, connection_id)
         elif settings.anti_search and message.text and not message.text.startswith("."):
+            storage.record_feature_usage("anti_search")
             await _apply_antisearch(message, bot, storage, connection_id)
         elif settings.anon_stickers and message.sticker and not (message.sticker.is_animated or message.sticker.is_video):
+            storage.record_feature_usage("anon_stickers")
             await _anonymize_sticker(message, bot, storage, connection_id)
         return
 
@@ -520,6 +536,9 @@ async def _handle_owner_message(
     is_admin = storage.is_admin(owner_id) if owner_id else False
     if flag and not getattr(settings, flag, True) and not is_admin:
         return  # команда выключена владельцем в /settings (для админов без ограничений)
+
+    if name:
+        storage.record_feature_usage(f".{name}")
 
     storage.mark_bot_deleted(connection_id, chat_id, message.message_id)
     try:
@@ -816,12 +835,16 @@ async def _dispatch(
         return
 
     if isinstance(command, ChatStatCommand):
+        storage.record_feature_usage(".stats")
         stats = storage.get_chat_stats(connection_id, chat_id)
         days_cnt = stats.get("days", 1)
         days_str = _format_days_ru(days_cnt)
         if not stats or stats.get("total", 0) == 0:
             text = "📊 <b>Статистика чата</b>\n\n<i>В базе нет сохранённых сообщений по этому чату.</i>"
-            await _notify_owner(bot, storage, connection_id, text)
+            try:
+                await bot.send_message(chat_id=chat_id, text=text, business_connection_id=connection_id)
+            except Exception:
+                await _notify_owner(bot, storage, connection_id, text)
         else:
             total = stats["total"]
             edits = stats["edits"]
@@ -860,33 +883,59 @@ async def _dispatch(
                 f"Чат ID: <code>{chat_id}</code>\n\n"
                 f"💬 <b>Всего сообщений в базе:</b> <b>{total}</b>\n"
                 + (initiative + "\n" if initiative else "")
-                + f"\n<b>📦 Содержимое:</b>\n" + "\n".join(breakdown_lines) + "\n\n"
+                + "\n<b>📦 Содержимое:</b>\n" + "\n".join(breakdown_lines) + "\n\n"
                 f"✏️ <b>Правок:</b> <b>{edits}</b> · 🗑 <b>Удалений:</b> <b>{deletes}</b>\n"
                 f"⏰ <b>Пик активности:</b> <b>{peak_h:02d}:00 – {(peak_h + 1) % 24:02d}:00</b>"
             )
 
-            # Пробуем отправить графики — но только если Pillow доступен
+            # Генерируем графики с поддержкой кириллицы
             hour_png = make_hourly_chart(hours_list, peak_h)
             kinds_png = make_kinds_pie(kinds, kind_labels) if kinds else None
 
-            owner_chat_id = storage.owner_chat_id(connection_id)
-            if owner_chat_id and hour_png:
-                try:
-                    from aiogram.types import InputMediaPhoto
-                    media_group = [InputMediaPhoto(
-                        media=BufferedInputFile(hour_png, filename="hours.png"),
-                        caption="⏰ Активность по часам"
-                    )]
-                    if kinds_png:
-                        media_group.append(InputMediaPhoto(
-                            media=BufferedInputFile(kinds_png, filename="kinds.png"),
-                            caption="📦 Типы сообщений"
-                        ))
-                    await bot.send_media_group(chat_id=owner_chat_id, media=media_group)
-                except Exception:
-                    logger.warning("Не удалось отправить графики chatstat", exc_info=True)
+            # Отправляем прямо в текущий чат через бизнес-подключение
+            sent_to_chat = False
+            try:
+                if hour_png:
+                    await bot.send_photo(
+                        chat_id=chat_id,
+                        photo=BufferedInputFile(hour_png, filename="hours.png"),
+                        caption="⏰ <b>Активность по часам</b>",
+                        business_connection_id=connection_id,
+                    )
+                if kinds_png:
+                    await bot.send_photo(
+                        chat_id=chat_id,
+                        photo=BufferedInputFile(kinds_png, filename="kinds.png"),
+                        caption="📦 <b>Типы сообщений</b>",
+                        business_connection_id=connection_id,
+                    )
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=text,
+                    business_connection_id=connection_id,
+                )
+                sent_to_chat = True
+            except Exception as exc:
+                logger.warning("Не удалось отправить .stats в бизнес-чат: %s, пересылаем в ЛС владельца", exc)
 
-            await _notify_owner(bot, storage, connection_id, text)
+            if not sent_to_chat:
+                owner_chat_id = storage.owner_chat_id(connection_id)
+                if owner_chat_id and hour_png:
+                    try:
+                        from aiogram.types import InputMediaPhoto
+                        media_group = [InputMediaPhoto(
+                            media=BufferedInputFile(hour_png, filename="hours.png"),
+                            caption="⏰ Активность по часам"
+                        )]
+                        if kinds_png:
+                            media_group.append(InputMediaPhoto(
+                                media=BufferedInputFile(kinds_png, filename="kinds.png"),
+                                caption="📦 Типы сообщений"
+                            ))
+                        await bot.send_media_group(chat_id=owner_chat_id, media=media_group)
+                    except Exception:
+                        pass
+                await _notify_owner(bot, storage, connection_id, text)
 
         with contextlib.suppress(Exception):
             await bot.delete_business_messages(business_connection_id=connection_id, message_ids=[message.message_id])

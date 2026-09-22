@@ -9,7 +9,7 @@ WORKDIR /app
 
 RUN useradd --create-home --shell /bin/bash appuser \
     && apt-get update \
-    && apt-get install -y --no-install-recommends gosu \
+    && apt-get install -y --no-install-recommends gosu fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

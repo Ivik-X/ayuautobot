@@ -12,7 +12,14 @@ from pathlib import Path
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatAction
 from aiogram.filters import Command, CommandStart
-from aiogram.types import CallbackQuery, FSInputFile, MenuButtonCommands, Message
+from aiogram.types import (
+    CallbackQuery,
+    FSInputFile,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    MenuButtonCommands,
+    Message,
+)
 
 from bot.backup import BackupManager
 from bot.media import (
@@ -227,32 +234,40 @@ async def us_open(call: CallbackQuery, storage: Storage) -> None:
 
 @router.callback_query(F.data.startswith("us:toggle:"))
 async def us_toggle(call: CallbackQuery, storage: Storage) -> None:
-    _, _, section, key = call.data.split(":", 3)
-    settings = storage.toggle_setting(call.from_user.id, key)
-    if section == "notif":
-        digest_count = storage.queue_count(call.from_user.id)
-        await call.message.edit_reply_markup(reply_markup=notifications_keyboard(settings, digest_count))
-    else:
-        await call.message.edit_reply_markup(reply_markup=section_keyboard(section, settings))
-    await call.answer("Сохранено")
+    try:
+        _, _, section, key = call.data.split(":", 3)
+        settings = storage.toggle_setting(call.from_user.id, key)
+        with contextlib.suppress(Exception):
+            if section == "notif":
+                digest_count = storage.queue_count(call.from_user.id)
+                await call.message.edit_reply_markup(reply_markup=notifications_keyboard(settings, digest_count))
+            else:
+                await call.message.edit_reply_markup(reply_markup=section_keyboard(section, settings))
+    finally:
+        with contextlib.suppress(Exception):
+            await call.answer("Сохранено")
 
 
 @router.callback_query(F.data.startswith("us:cycle:"))
 async def us_cycle(call: CallbackQuery, storage: Storage) -> None:
-    _, _, section, key = call.data.split(":", 3)
-    field = get_owner_field(key)
-    if field is None:
-        await call.answer("Неизвестная настройка", show_alert=True)
-        return
-    current_settings = storage.get_settings(call.from_user.id)
-    new_value = next_cycle_value(field, getattr(current_settings, key))
-    settings = storage.update_setting(call.from_user.id, key, new_value)
-    if section == "notif":
-        digest_count = storage.queue_count(call.from_user.id)
-        await call.message.edit_reply_markup(reply_markup=notifications_keyboard(settings, digest_count))
-    else:
-        await call.message.edit_reply_markup(reply_markup=section_keyboard(section, settings))
-    await call.answer("Сохранено")
+    try:
+        _, _, section, key = call.data.split(":", 3)
+        field = get_owner_field(key)
+        if field is None:
+            await call.answer("Неизвестная настройка", show_alert=True)
+            return
+        current_settings = storage.get_settings(call.from_user.id)
+        new_value = next_cycle_value(field, getattr(current_settings, key))
+        settings = storage.update_setting(call.from_user.id, key, new_value)
+        with contextlib.suppress(Exception):
+            if section == "notif":
+                digest_count = storage.queue_count(call.from_user.id)
+                await call.message.edit_reply_markup(reply_markup=notifications_keyboard(settings, digest_count))
+            else:
+                await call.message.edit_reply_markup(reply_markup=section_keyboard(section, settings))
+    finally:
+        with contextlib.suppress(Exception):
+            await call.answer("Сохранено")
 
 
 @router.callback_query(F.data.startswith("us:edit:"))
@@ -377,8 +392,9 @@ async def us_export_chat(call: CallbackQuery, storage: Storage) -> None:
 
 
 @router.callback_query(F.data == "us:search")
-async def us_search(call: CallbackQuery) -> None:
+async def us_search(call: CallbackQuery, storage: Storage) -> None:
     owner_id = call.from_user.id
+    storage.record_feature_usage("search_db")
     _pending[owner_id] = {"kind": "db_search", "created_at": time.time()}
     await call.answer()
     await call.message.answer(
@@ -399,11 +415,8 @@ def _safe_filename(name: str) -> str:
 @router.callback_query(F.data == "us:recent")
 async def us_recent(call: CallbackQuery, storage: Storage) -> None:
     owner_id = call.from_user.id
-    connection_ids = storage.connections_for_owner(owner_id)
-    chats: list[tuple[int, str, int]] = []
-    for connection_id in connection_ids:
-        chats.extend(storage.chats_for_connection(connection_id))
-    chats.sort(key=lambda item: item[2], reverse=True)
+    storage.record_feature_usage("recent_messages")
+    chats = storage.recent_chats(owner_id)
 
     if not chats:
         await call.answer(
@@ -413,7 +426,7 @@ async def us_recent(call: CallbackQuery, storage: Storage) -> None:
         return
 
     await call.message.edit_text(
-        "<b>👁‍🗨 Последние сообщения</b>\nВыберите чат:", reply_markup=chats_recent_keyboard(chats)
+        "<b>💬 Последние сообщения</b>\nВыберите чат (новые сверху):", reply_markup=chats_recent_keyboard(chats)
     )
     await call.answer()
 
@@ -665,6 +678,7 @@ async def us_online_custom(call: CallbackQuery, storage: Storage) -> None:
 @router.callback_query(F.data == "us:open:actions")
 async def us_open_actions(call: CallbackQuery, storage: Storage) -> None:
     owner_id = call.from_user.id
+    storage.record_feature_usage("chat_actions_menu")
     chats = storage.recent_chats(owner_id)
     text = (
         "⚡️ <b>Действия над чатом (Скрытый режим)</b>\n\n"
@@ -672,7 +686,7 @@ async def us_open_actions(call: CallbackQuery, storage: Storage) -> None:
         "<b>напрямую из меню бота</b>, чтобы в чате с собеседником не мелькали точки и служебные сообщения!\n\n"
         "Выберите недавний диалог или укажите Chat ID вручную:"
     )
-    chat_list = [{"chat_id": cid, "title": st.title} for cid, st in chats]
+    chat_list = [{"chat_id": c["chat_id"], "title": c["title"]} for c in chats]
     await call.message.edit_text(text, reply_markup=chat_actions_menu_keyboard(chat_list))
     await call.answer()
 
@@ -757,6 +771,7 @@ async def act_execute(call: CallbackQuery, storage: Storage) -> None:
 @router.callback_query(F.data == "us:open:delword")
 async def us_open_delword(call: CallbackQuery, storage: Storage) -> None:
     owner_id = call.from_user.id
+    storage.record_feature_usage("delword")
     conns = storage.connections_for_owner(owner_id)
     if not conns:
         await call.answer("Нет подключённого Telegram Business", show_alert=True)
@@ -774,8 +789,9 @@ async def us_open_delword(call: CallbackQuery, storage: Storage) -> None:
 @router.callback_query(F.data == "delword:scope:single")
 async def delword_scope_single(call: CallbackQuery, storage: Storage) -> None:
     owner_id = call.from_user.id
+    storage.record_feature_usage("delword")
     chats = storage.recent_chats(owner_id)
-    chat_list = [{"chat_id": cid, "title": st.title} for cid, st in chats]
+    chat_list = [{"chat_id": c["chat_id"], "title": c["title"]} for c in chats]
     text = "🎯 <b>Выберите чат для очистки</b> или введите Chat ID вручную:"
     await call.message.edit_text(text, reply_markup=delword_pick_chat_keyboard(chat_list))
     await call.answer()
@@ -869,6 +885,83 @@ async def ad_back(call: CallbackQuery, storage: Storage, backup: BackupManager) 
         await call.answer()
         return
     await call.message.edit_text(_admin_overview_text(storage, backup), reply_markup=admin_main_keyboard())
+    await call.answer()
+
+
+@router.callback_query(F.data == "ad:feature_stats")
+async def ad_feature_stats(call: CallbackQuery, storage: Storage) -> None:
+    if not storage.is_admin(call.from_user.id):
+        await call.answer()
+        return
+
+    stats = storage.get_feature_usage_stats()
+    if not stats:
+        text = "📊 <b>Статистика популярности функций</b>\n\n<i>Пока нет данных об использовании функций.</i>"
+    else:
+        total_uses = sum(item["count"] for item in stats)
+        lines = [
+            "📊 <b>Популярность использования функций бота</b>\n",
+            f"Всего использований: <b>{total_uses}</b>\n",
+        ]
+
+        feature_labels = {
+            ".spam": ".spam (спам сообщениями)",
+            ".mute": ".mute / .unmute (мут чата)",
+            ".typing": ".typing (имитация набора)",
+            ".del": ".del (удаление сообщений)",
+            ".mock": ".mock (заборчик)",
+            ".reverse": ".reverse (реверс текста)",
+            ".troll": ".troll (троллинг)",
+            ".tr": ".tr (переводчик)",
+            ".qr": ".qr (генерация QR)",
+            ".short": ".short (сокращение ссылок)",
+            ".id": ".id (ID и инфо чата)",
+            ".ping": ".ping (проверка отклика)",
+            ".say": ".say (быстрые ответы/пресеты)",
+            ".view": ".view (самоуничтожающиеся фото)",
+            ".watch": ".watch (отслеживание профилей)",
+            ".clone": ".clone (клонирование профиля)",
+            ".tonote": ".tonote (в кружок)",
+            ".tovoice": ".tovoice (в голосовое)",
+            ".chatstat": ".stats / .chatstat (статистика)",
+            ".stats": ".stats (статистика чата)",
+            "anti_search": "🕵️ Антипоиск (подмена букв)",
+            "murino_mode": "🐱 Муринский язык",
+            "anon_stickers": "🎭 Анонимные стикеры",
+            "afk_reply": "💤 AFK-автоответ",
+            "recent_messages": "💬 Последние сообщения",
+            "chat_actions_menu": "⚡️ Действия над чатом (меню)",
+            "delword": "🗑 Очистка по слову/рег.",
+            "export_history": "📤 Экспорт истории",
+            "search_db": "🔍 Умный поиск по базе",
+            "online_mode": "🟢 Онлайн-режим",
+            "ghost_mode": "👻 Режим призрака",
+        }
+
+        for idx, item in enumerate(stats, 1):
+            feat = item["feature"]
+            cnt = item["count"]
+            last = item["last_used"]
+            pct = (cnt / total_uses * 100) if total_uses > 0 else 0
+            label = feature_labels.get(feat, feat)
+
+            diff_sec = max(0, time.time() - last)
+            diff_min = int(diff_sec / 60)
+            if diff_min < 1:
+                ago = "только что"
+            elif diff_min < 60:
+                ago = f"{diff_min}м назад"
+            elif diff_min < 1440:
+                ago = f"{diff_min // 60}ч назад"
+            else:
+                ago = f"{diff_min // 1440}д назад"
+
+            lines.append(f"<b>{idx}.</b> <code>{label}</code>: <b>{cnt}</b> ({pct:.1f}%) — <i>{ago}</i>")
+
+        text = "\n".join(lines)
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="ad:back")]])
+    await call.message.edit_text(text, reply_markup=kb)
     await call.answer()
 
 

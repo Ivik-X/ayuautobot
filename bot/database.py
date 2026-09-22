@@ -208,6 +208,12 @@ class Database:
                 data TEXT NOT NULL DEFAULT '{}'
             );
 
+            CREATE TABLE IF NOT EXISTS feature_usage (
+                feature       TEXT PRIMARY KEY,
+                count         INTEGER NOT NULL DEFAULT 0,
+                last_used     REAL NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_messages_cached_at ON messages(cached_at);
             CREATE INDEX IF NOT EXISTS idx_messages_deleted_at ON messages(deleted_at);
             CREATE INDEX IF NOT EXISTS idx_notifications_owner ON notifications_queue(owner_id);
@@ -289,6 +295,15 @@ class Database:
             pass
 
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_owner ON messages(owner_id)")
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS feature_usage (
+                feature       TEXT PRIMARY KEY,
+                count         INTEGER NOT NULL DEFAULT 0,
+                last_used     REAL NOT NULL
+            );
+            """
+        )
         self._conn.commit()
 
     # ------------------------------------------------------------------ owners
@@ -728,6 +743,58 @@ class Database:
         result = [(chat_id, stats) for chat_id, stats in grouped.items()]
         result.sort(key=lambda item: item[1].total, reverse=True)
         return result
+
+    def recent_chats(self, owner_id: int, limit: int = 30) -> list[dict]:
+        """Возвращает недавние чаты пользователя, отсортированные по времени последнего сообщения (новые сверху)."""
+        rows = self._conn.execute(
+            """
+            SELECT chat_id,
+                   COALESCE(NULLIF(chat_title, ''), CAST(chat_id AS TEXT)) AS title,
+                   MAX(cached_at) AS last_active
+            FROM messages
+            WHERE owner_id = ? OR connection_id IN (SELECT connection_id FROM connections WHERE owner_id = ?)
+            GROUP BY chat_id
+            ORDER BY last_active DESC
+            LIMIT ?
+            """,
+            (owner_id, owner_id, limit),
+        ).fetchall()
+        return [
+            {
+                "chat_id": int(r["chat_id"]),
+                "title": str(r["title"]),
+                "last_active": float(r["last_active"]),
+            }
+            for r in rows
+        ]
+
+    def record_feature_usage(self, feature: str) -> None:
+        """Фиксирует использование команды или функции бота для админ-аналитики."""
+        self._conn.execute(
+            """
+            INSERT INTO feature_usage (feature, count, last_used)
+            VALUES (?, 1, ?)
+            ON CONFLICT(feature) DO UPDATE SET
+                count = count + 1,
+                last_used = excluded.last_used
+            """,
+            (feature, time.time()),
+        )
+        self._conn.commit()
+
+    def get_feature_usage_stats(self) -> list[dict]:
+        """Возвращает статистику популярности всех функций бота."""
+        rows = self._conn.execute(
+            "SELECT feature, count, last_used FROM feature_usage ORDER BY count DESC, last_used DESC"
+        ).fetchall()
+        return [
+            {
+                "feature": str(r["feature"]),
+                "count": int(r["count"]),
+                "last_used": float(r["last_used"]),
+            }
+            for r in rows
+        ]
 
     def purge_oldest_batch(self, batch_size: int) -> int:
         """Удаляет batch_size самых старых сообщений (по всем владельцам) — для
