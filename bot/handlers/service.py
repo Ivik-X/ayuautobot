@@ -190,7 +190,7 @@ async def us_noop(call: CallbackQuery) -> None:
     await call.answer()
 
 
-@router.callback_query(F.data.startswith("us:open:"))
+@router.callback_query(F.data.in_({"us:open:notif", "us:open:extra", "us:open:cmds", "us:open:misc", "us:open:presets", "us:open:ghost"}))
 async def us_open(call: CallbackQuery, storage: Storage) -> None:
     section = call.data.split(":", 2)[2]
     owner_id = call.from_user.id
@@ -229,7 +229,11 @@ async def us_open(call: CallbackQuery, storage: Storage) -> None:
 async def us_toggle(call: CallbackQuery, storage: Storage) -> None:
     _, _, section, key = call.data.split(":", 3)
     settings = storage.toggle_setting(call.from_user.id, key)
-    await call.message.edit_reply_markup(reply_markup=section_keyboard(section, settings))
+    if section == "notif":
+        digest_count = storage.queue_count(call.from_user.id)
+        await call.message.edit_reply_markup(reply_markup=notifications_keyboard(settings, digest_count))
+    else:
+        await call.message.edit_reply_markup(reply_markup=section_keyboard(section, settings))
     await call.answer("Сохранено")
 
 
@@ -243,7 +247,11 @@ async def us_cycle(call: CallbackQuery, storage: Storage) -> None:
     current_settings = storage.get_settings(call.from_user.id)
     new_value = next_cycle_value(field, getattr(current_settings, key))
     settings = storage.update_setting(call.from_user.id, key, new_value)
-    await call.message.edit_reply_markup(reply_markup=section_keyboard(section, settings))
+    if section == "notif":
+        digest_count = storage.queue_count(call.from_user.id)
+        await call.message.edit_reply_markup(reply_markup=notifications_keyboard(settings, digest_count))
+    else:
+        await call.message.edit_reply_markup(reply_markup=section_keyboard(section, settings))
     await call.answer("Сохранено")
 
 
@@ -786,7 +794,7 @@ async def delword_pick_chat(call: CallbackQuery, storage: Storage) -> None:
     owner_id = call.from_user.id
     chat_id = int(call.data.split(":", 2)[2])
     conns = storage.connections_for_owner(owner_id)
-    conn_id = conns[0].connection_id if conns else ""
+    conn_id = conns[0] if conns else ""
     _pending[owner_id] = {
         "kind": "act_delword_prompt",
         "chat_id": chat_id,
@@ -1182,8 +1190,9 @@ async def private_input(message: Message, storage: Storage) -> None:
                 }.get(media.kind, "📁 Медиафайл")
 
                 if not rows:
+                    note = " (файл не удалось загрузить для вычисления хэша — возможно, он превышает лимит Bot API 20 МБ)" if not data else ""
                     await status_msg.edit_text(
-                        f"🔍 <b>Поиск по медиа ({media_label}):</b>\n\nНичего не найдено в базе сохранённых сообщений."
+                        f"🔍 <b>Поиск по медиа ({media_label}):</b>\n\nНичего не найдено в базе сохранённых сообщений{note}."
                     )
                     return
 
@@ -1469,7 +1478,7 @@ async def private_input(message: Message, storage: Storage) -> None:
             return
         target_chat = int(raw)
         conns = storage.connections_for_owner(user_id)
-        conn_id = conns[0].connection_id if conns else ""
+        conn_id = conns[0] if conns else ""
         _pending[user_id] = {
             "kind": "act_delword_prompt",
             "chat_id": target_chat,

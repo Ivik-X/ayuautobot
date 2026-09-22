@@ -271,14 +271,19 @@ class Database:
             self._conn.execute("ALTER TABLE owners ADD COLUMN username TEXT")
             self._conn.commit()
 
-        # Если в сохранённых глобальных настройках стоял старый 48-часовой или 168-часовой TTL сообщений,
-        # сбрасываем его на 0.0 (бессрочно, до переполнения квоты), чтобы не удалять историю пользователей.
+        # Гарантируем, что сообщения и медиа не удаляются по TTL/бэкапу (0.0 = бессрочно до переполнения диска)
         try:
             raw_g = self.get_global_settings_raw()
             if raw_g:
                 gdata = json.loads(raw_g)
-                if gdata.get("media_max_age_hours") in (48.0, 168.0, 48, 168):
+                changed = False
+                if gdata.get("media_max_age_hours", 0) != 0.0:
                     gdata["media_max_age_hours"] = 0.0
+                    changed = True
+                if gdata.get("backup_keep_local_hours", 0) != 0.0:
+                    gdata["backup_keep_local_hours"] = 0.0
+                    changed = True
+                if changed:
                     self.save_global_settings(json.dumps(gdata, ensure_ascii=False))
         except Exception:
             pass
@@ -834,7 +839,34 @@ class Database:
                 (owner_id, id_query, id_query, id_query, limit),
             ).fetchall()
 
-        # 2. Умное определение: регулярное выражение или обычный поиск
+        # 2. Поиск по префиксам chat: или from:
+        if query_str.lower().startswith("chat:") or query_str.lower().startswith("in:"):
+            chat_target = query_str.split(":", 1)[1].strip()
+            return self._conn.execute(
+                """
+                SELECT connection_id, chat_id, chat_title, message_id, from_user_name, content, cached_at, media_kind, deleted_at, edited_at
+                FROM messages
+                WHERE owner_id = ? AND chat_title LIKE ?
+                ORDER BY cached_at DESC
+                LIMIT ?
+                """,
+                (owner_id, f"%{chat_target}%", limit),
+            ).fetchall()
+
+        if query_str.lower().startswith("from:") or query_str.lower().startswith("user:"):
+            user_target = query_str.split(":", 1)[1].strip()
+            return self._conn.execute(
+                """
+                SELECT connection_id, chat_id, chat_title, message_id, from_user_name, content, cached_at, media_kind, deleted_at, edited_at
+                FROM messages
+                WHERE owner_id = ? AND from_user_name LIKE ?
+                ORDER BY cached_at DESC
+                LIMIT ?
+                """,
+                (owner_id, f"%{user_target}%", limit),
+            ).fetchall()
+
+        # 3. Умное определение: регулярное выражение или обычный текстовый поиск
         is_explicit_regex = False
         regex_pat = query_str
         if query_str.startswith("re:") or query_str.startswith("regex:"):
@@ -844,70 +876,41 @@ class Database:
             is_explicit_regex = True
             regex_pat = query_str[1:-1]
 
-        regex_chars = r".*+?[]{}()^$|\\"
-        looks_like_regex = is_explicit_regex or any(c in query_str for c in regex_chars)
-
-        regex_rows = []
-        if looks_like_regex:
+        if is_explicit_regex:
             try:
                 import re
                 re.compile(regex_pat)
-                regex_rows = self._conn.execute(
+                return self._conn.execute(
                     """
                     SELECT connection_id, chat_id, chat_title, message_id, from_user_name, content, cached_at, media_kind, deleted_at, edited_at
                     FROM messages
                     WHERE owner_id = ? AND (
                         content REGEXP ? OR
-                        media_file_name REGEXP ? OR
-                        media_kind REGEXP ? OR
-                        media_file_id REGEXP ?
+                        media_file_name REGEXP ?
                     )
                     ORDER BY cached_at DESC
                     LIMIT ?
                     """,
-                    (owner_id, regex_pat, regex_pat, regex_pat, regex_pat, limit),
+                    (owner_id, regex_pat, regex_pat, limit),
                 ).fetchall()
             except Exception:
-                regex_rows = []
+                return []
 
-        if is_explicit_regex:
-            return regex_rows
-
-        # Обычный текстовый поиск
+        # Обычный точный текстовый поиск по содержимому и имени файла
         pattern = f"%{query_str}%"
-        like_rows = self._conn.execute(
+        return self._conn.execute(
             """
             SELECT connection_id, chat_id, chat_title, message_id, from_user_name, content, cached_at, media_kind, deleted_at, edited_at
             FROM messages
             WHERE owner_id = ? AND (
                 content LIKE ? OR
-                media_file_name LIKE ? OR
-                media_kind LIKE ? OR
-                media_file_id LIKE ? OR
-                from_user_name LIKE ? OR
-                chat_title LIKE ?
+                media_file_name LIKE ?
             )
             ORDER BY cached_at DESC
             LIMIT ?
             """,
-            (owner_id, pattern, pattern, pattern, pattern, pattern, pattern, limit),
+            (owner_id, pattern, pattern, limit),
         ).fetchall()
-
-        if not regex_rows:
-            return like_rows
-        if not like_rows:
-            return regex_rows
-
-        # Если есть результаты и по регулярке, и по обычному тексту — объединяем без дубликатов
-        seen = set()
-        merged = []
-        for r in list(regex_rows) + list(like_rows):
-            k = (r["connection_id"], r["chat_id"], r["message_id"])
-            if k not in seen:
-                seen.add(k)
-                merged.append(r)
-        merged.sort(key=lambda x: x["cached_at"], reverse=True)
-        return merged[:limit]
 
     def search_messages_by_media(
         self,

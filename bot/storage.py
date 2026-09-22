@@ -29,7 +29,7 @@ class Storage:
         self._global_settings: GlobalSettings | None = None
         self._cache: LRUCache[tuple[str, int, int], CachedMessage] = LRUCache(
             self.get_global().cache_max_entries,
-            on_evict=lambda _key, item: unlink_media(item.media),
+            on_evict=None,
         )
         self._mute: dict[tuple[str, int], MuteSession] = {}
         self._bot_deleted: set[tuple[str, int, int]] = set()
@@ -247,15 +247,12 @@ class Storage:
             if ttl_seconds and now - item.cached_at > ttl_seconds:
                 stale.append(key)
         for key in stale:
-            item = self._cache.pop(key)
-            if item is not None:
-                unlink_media(item.media)
+            self._cache.pop(key)
         return len(stale)
 
     def purge_all(self) -> int:
         count = len(self._cache)
-        for key, item in list(self._cache.items()):
-            unlink_media(item.media)
+        for key in list(self._cache.keys()):
             self._cache.pop(key)
         return count
 
@@ -693,6 +690,18 @@ def describe_message(message: Message) -> str:
         pinned_text = message.pinned_message.text or message.pinned_message.caption or describe_message(message.pinned_message)
         short = pinned_text[:80] + ("…" if len(pinned_text) > 80 else "")
         parts.append(f"📌 закреплено: {short}")
+    if getattr(message, "message_auto_delete_timer_changed", None):
+        timer_info = message.message_auto_delete_timer_changed
+        sec = getattr(timer_info, "message_auto_delete_time", 0)
+        if sec:
+            days = sec // 86400
+            hours = (sec % 86400) // 3600
+            t_str = f"{days} дн." if days else f"{hours} ч."
+            parts.append(f"⏱ автоудаление установлено на {t_str}")
+        else:
+            parts.append("⏱ автоудаление отключено")
+    if getattr(message, "new_chat_title", None):
+        parts.append(f"✏️ новое название чата: {message.new_chat_title}")
 
     # Пересылка
     if message.forward_origin:

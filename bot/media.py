@@ -293,15 +293,19 @@ async def download_media(
 
 
 async def download_bytes(bot: Bot, file_id: str) -> bytes | None:
-    """Скачивает файл в память (без записи на диск) — для антиспойлера/анонимных стикеров."""
+    """Скачивает файл в память (без записи на диск) — для поиска, антиспойлера и стикеров."""
     try:
-        tg_file = await bot.get_file(file_id)
-        if not tg_file.file_path:
+        buffer = await bot.download(file_id)
+        if buffer is None:
             return None
-        buffer = await bot.download_file(tg_file.file_path)
-        return buffer.read() if buffer else None
-    except Exception:
-        logger.exception("Не удалось скачать файл %s в память", file_id)
+        if hasattr(buffer, "getvalue"):
+            return buffer.getvalue()
+        if hasattr(buffer, "read"):
+            buffer.seek(0)
+            return buffer.read()
+        return None
+    except Exception as exc:
+        logger.warning("Не удалось скачать файл %s в память: %s", file_id, exc)
         return None
 
 

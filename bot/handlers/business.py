@@ -304,6 +304,16 @@ async def on_deleted_business_messages(event: BusinessMessagesDeleted, bot: Bot,
         if bot_caused and not settings.notify_own_deletions:
             continue
 
+        # Если сообщение не было закэшировано ботом (например, старое сообщение,
+        # удалённое нативным таймером автоудаления Telegram) — не шлём пустые уведомления
+        if cached is None:
+            continue
+
+        # Пропускаем пустые сообщения без медиа (например, служебные таймеры автоудаления)
+        is_empty_content = not cached.content or cached.content == "[сообщение без текста]"
+        if is_empty_content and not cached.media and not cached.flags:
+            continue
+
         def _safe_html(text: str) -> str:
             if not text:
                 return ""
@@ -311,8 +321,8 @@ async def on_deleted_business_messages(event: BusinessMessagesDeleted, bot: Bot,
                 return text
             return html.escape(text)
 
-        sender = cached.from_user_name if cached else (chat.full_name or chat.username or "собеседник")
-        body = cached.content if cached else "— (сообщение не было получено ботом, пока он был запущен)"
+        sender = cached.from_user_name or (chat.full_name or chat.username or "собеседник")
+        body = cached.content or "[сообщение без текста]"
         flags = ""
         if cached and cached.flags:
             flags = "\n" + " ".join(cached.flags)
