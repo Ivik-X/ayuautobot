@@ -1385,7 +1385,6 @@ async def private_input(message: Message, storage: Storage) -> None:
         _pending.pop(user_id, None)
         status = await message.answer("⏳ Загружаю файл и заменяю БД…")
         try:
-            from bot.media import download_bytes
             data = await download_bytes(message.bot, doc.file_id)
             if not data:
                 await status.edit_text("❌ Не удалось скачать файл.")
