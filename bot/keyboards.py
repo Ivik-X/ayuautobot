@@ -141,6 +141,15 @@ def preset_view_keyboard(name: str) -> InlineKeyboardMarkup:
     )
 
 
+def preset_creation_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Готово", callback_data="us:preset:done")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="us:preset:cancel")],
+        ]
+    )
+
+
 def chats_export_keyboard(chats: list[tuple[int, str, int]]) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     for chat_id, title, count in chats[:20]:
